@@ -4,13 +4,14 @@ import logging
 import threading
 import queue
 import time
+import os
+import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Type, Any, Tuple
 from collections import defaultdict
-import gc
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert
@@ -42,10 +43,10 @@ class BatchMetrics:
             return self.events_processed / self.processing_time
         return 0.0
 
+
 class BatchProcessor:
     """Process GitHub events in efficient batches."""
 
-    # Mapping of event types to their respective entity classes
     EVENT_ENTITY_MAP = {
         'PushEvent': Commit,
         'PullRequestEvent': PullRequest,
@@ -73,7 +74,7 @@ class BatchProcessor:
         
         # Initialize database engine with optimized settings
         self.engine = create_engine(
-            config.database.url,
+            config.database_url,
             pool_size=self.max_workers,
             max_overflow=self.max_workers * 2,
             pool_pre_ping=True,
@@ -86,147 +87,115 @@ class BatchProcessor:
 
     def _create_indexes(self):
         """Create database indexes for performance optimization."""
-        with self.engine.connect() as conn:
-            # Create indexes if they don't exist
-            indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_repository_full_name ON repository (full_name)",
-                "CREATE INDEX IF NOT EXISTS idx_event_type ON event (type)",
-                "CREATE INDEX IF NOT EXISTS idx_event_created_at ON event (created_at)",
-                "CREATE INDEX IF NOT EXISTS idx_commit_sha ON commit (sha)",
-                "CREATE INDEX IF NOT EXISTS idx_pull_request_number ON pull_request (number)",
-                "CREATE INDEX IF NOT EXISTS idx_issue_number ON issue (number)"
-            ]
-            for idx in indexes:
-                try:
-                    conn.execute(text(idx))
-                except Exception as e:
-                    logger.warning(f"Failed to create index: {e}")
-            conn.commit()
+        with self.get_session() as session:
+            # Create indexes on commonly queried fields
+            session.execute('CREATE INDEX IF NOT EXISTS idx_repo_id ON repositories (repo_id)')
+            session.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON contributors (user_id)')
+            session.execute('CREATE INDEX IF NOT EXISTS idx_commit_hash ON commits (commit_hash)')
+            session.execute('CREATE INDEX IF NOT EXISTS idx_pr_github_id ON pull_requests (github_id)')
+            session.execute('CREATE INDEX IF NOT EXISTS idx_issue_github_id ON issues (github_id)')
+            session.commit()
 
     def get_session(self) -> Session:
         """Get thread-local session."""
-        if not hasattr(self.thread_local, "session"):
+        if not hasattr(self.thread_local, 'session'):
             self.thread_local.session = self.Session()
         return self.thread_local.session
 
-    def _bulk_insert(self, session: Session, objects: List[Any]) -> None:
+    def _bulk_insert(self, session: Session, objects: List[Any]):
         """Perform bulk insert operation."""
         if not objects:
             return
-
+            
         try:
-            # Group objects by type
-            by_type = defaultdict(list)
-            for obj in objects:
-                by_type[type(obj)].append(obj)
-
-            # Bulk insert each type
-            for obj_type, items in by_type.items():
-                session.bulk_save_objects(items)
-            
+            session.bulk_save_objects(objects)
             session.commit()
-            self.metrics.db_operations += 1
-            
+            self.metrics.db_operations += len(objects)
         except IntegrityError as e:
             session.rollback()
-            logger.error(f"Bulk insert failed: {e}")
-            self.metrics.errors += 1
+            logger.warning(f"Bulk insert failed, falling back to individual inserts: {e}")
+            
             # Fall back to individual inserts
             for obj in objects:
                 try:
                     session.merge(obj)
                     session.commit()
-                except Exception as e2:
-                    session.rollback()
-                    logger.error(f"Individual insert failed: {e2}")
-                    self.metrics.errors += 1
-
-    def process_event_batch(self, events: List[Dict]) -> None:
-        """Process a batch of events in parallel."""
-        session = self.get_session()
-        mapper = RepositoryMapper(session, self.config)
-        
-        try:
-            # Group events by type
-            events_by_type = defaultdict(list)
-            for event in events:
-                events_by_type[event['type']].append(event)
-
-            # Process each event type in parallel
-            futures = []
-            for event_type, type_events in events_by_type.items():
-                future = self.executor.submit(
-                    self._process_event_type_batch,
-                    event_type,
-                    type_events,
-                    mapper
-                )
-                futures.append(future)
-
-            # Wait for all processing to complete
-            for future in as_completed(futures):
-                try:
-                    future.result()
+                    self.metrics.db_operations += 1
                 except Exception as e:
-                    logger.error(f"Batch processing error: {e}")
+                    session.rollback()
+                    logger.error(f"Failed to insert object: {e}")
                     self.metrics.errors += 1
 
-            # Update metrics
-            self.metrics.events_processed += len(events)
-            self.metrics.batch_size = len(events)
-            self.metrics.processing_time = time.time() - self.metrics.start_time
+    def process_event_batch(self, events: List[Dict]):
+        """Process a batch of events in parallel."""
+        if not events:
+            return
             
-            # Trigger garbage collection after large batches
-            if len(events) >= self.batch_size:
-                gc.collect()
+        # Group events by type for efficient processing
+        event_groups = defaultdict(list)
+        for event in events:
+            event_type = event.get('type')
+            if event_type in self.EVENT_ENTITY_MAP:
+                event_groups[event_type].append(event)
 
-        finally:
-            session.close()
+        # Process each event type in parallel
+        futures = []
+        for event_type, type_events in event_groups.items():
+            future = self.executor.submit(self._process_event_type_batch, event_type, type_events)
+            futures.append(future)
 
-    def _process_event_type_batch(self, event_type: str, events: List[Dict], mapper: RepositoryMapper) -> None:
+        # Wait for all processing to complete
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"Batch processing failed: {e}")
+                self.metrics.errors += 1
+
+        # Update metrics
+        self.metrics.events_processed += len(events)
+        self.metrics.processing_time = time.time() - self.metrics.start_time
+        self.metrics.memory_usage = self._get_memory_usage()
+
+        # Perform garbage collection after large batches
+        if len(events) >= self.batch_size:
+            gc.collect()
+
+    def _process_event_type_batch(self, event_type: str, events: List[Dict]):
         """Process a batch of events of the same type."""
         session = self.get_session()
-        
         try:
             # Map events to database objects
-            mapped_objects = []
-            for event in events:
-                try:
-                    # Use appropriate mapping method based on event type
-                    mapping_method = getattr(mapper, f"map_{event_type.lower()}")
-                    result = mapping_method(event)
-                    
-                    if isinstance(result, tuple):
-                        mapped_objects.extend(obj for obj in result if obj is not None)
-                    else:
-                        mapped_objects.append(result)
-                        
-                except Exception as e:
-                    logger.error(f"Error mapping event {event.get('id')}: {e}")
-                    self.metrics.errors += 1
-
-            # Perform bulk insert
-            if mapped_objects:
-                self._bulk_insert(session, mapped_objects)
-
+            entity_class = self.EVENT_ENTITY_MAP[event_type]
+            mapper = RepositoryMapper()
+            objects = [mapper.map_event_to_entity(event, entity_class) for event in events]
+            
+            # Bulk insert objects
+            self._bulk_insert(session, objects)
+            
+        except Exception as e:
+            logger.error(f"Failed to process {event_type} batch: {e}")
+            self.metrics.errors += 1
         finally:
             session.close()
 
-    def add_event(self, event: Dict) -> None:
+    def add_event(self, event: Dict):
         """Add an event to the appropriate queue for batch processing."""
         event_type = event.get('type')
-        if event_type:
+        if event_type in self.EVENT_ENTITY_MAP:
             try:
                 self.event_queues[event_type].put(event)
                 
-                # Process batch if queue is full
+                # Process queue if it's full
                 if self.event_queues[event_type].qsize() >= self.batch_size:
                     self._process_queue(event_type)
+                    
             except queue.Full:
-                logger.warning(f"Queue full for event type {event_type}")
+                logger.warning(f"Queue for {event_type} is full, processing immediately")
                 self._process_queue(event_type)
+                self.event_queues[event_type].put(event)
 
-    def _process_queue(self, event_type: str) -> None:
+    def _process_queue(self, event_type: str):
         """Process all events in a queue."""
         events = []
         queue = self.event_queues[event_type]
@@ -236,26 +205,24 @@ class BatchProcessor:
                 events.append(queue.get_nowait())
             except queue.Empty:
                 break
-
+                
         if events:
             self.process_event_batch(events)
 
-    def flush_queues(self) -> None:
+    def flush_queues(self):
         """Process all remaining events in queues."""
         for event_type in self.event_queues:
             self._process_queue(event_type)
 
-    def get_metrics(self) -> Dict[str, Any]:
+    def get_metrics(self) -> BatchMetrics:
         """Get current processing metrics."""
-        return {
-            "events_processed": self.metrics.events_processed,
-            "api_calls": self.metrics.api_calls,
-            "db_operations": self.metrics.db_operations,
-            "errors": self.metrics.errors,
-            "throughput": self.metrics.calculate_throughput(),
-            "batch_size": self.metrics.batch_size,
-            "processing_time": self.metrics.processing_time
-        }
+        return self.metrics
+
+    def _get_memory_usage(self) -> float:
+        """Get current memory usage in MB."""
+        import psutil
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / 1024 / 1024
 
     def __enter__(self):
         """Context manager entry."""
@@ -265,5 +232,5 @@ class BatchProcessor:
         """Context manager exit with cleanup."""
         self.flush_queues()
         self.executor.shutdown(wait=True)
-        for session in getattr(self.thread_local, "session", []):
+        for session in getattr(self.thread_local, 'session', []):
             session.close()

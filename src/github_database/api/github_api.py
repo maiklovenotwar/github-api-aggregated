@@ -16,6 +16,9 @@ headers = {
     'Accept': 'application/vnd.github.v3+json'
 }
 
+# GitHub API Base URL
+GITHUB_API_BASE = "https://api.github.com"
+
 class GitHubAPIError(Exception):
     """Basis-Exception für GitHub API Fehler"""
     pass
@@ -30,12 +33,12 @@ class RateLimitError(GitHubAPIError):
     retry=retry_if_exception_type((RateLimitError, requests.exceptions.RequestException)),
     before_sleep=lambda retry_state: print(f"Retry {retry_state.attempt_number}/3 nach {retry_state.idle_for:.1f}s...")
 )
-def make_github_request(url: str, params: Optional[Dict] = None) -> requests.Response:
+def make_github_request(endpoint: str, params: Optional[Dict] = None) -> requests.Response:
     """
     Führt einen GitHub API Request mit Retry-Logik aus.
     
     Args:
-        url: API URL
+        endpoint: API endpoint (z.B. 'repositories' oder 'rate_limit')
         params: Query Parameter
         
     Returns:
@@ -45,6 +48,12 @@ def make_github_request(url: str, params: Optional[Dict] = None) -> requests.Res
         RateLimitError: Bei Rate Limit (HTTP 403/429)
         GitHubAPIError: Bei anderen API Fehlern
     """
+    # Handle full URLs vs endpoint names
+    if endpoint.startswith('http'):
+        url = endpoint
+    else:
+        url = f"{GITHUB_API_BASE}/{endpoint}"
+    
     response = requests.get(url, headers=headers, params=params or {})
     
     if response.status_code in (403, 429):
@@ -73,10 +82,11 @@ def get_repositories_since(since_id: Optional[int] = None, per_page: int = 100) 
         Tuple aus (Liste der gefundenen Repositories, letzte Repository ID)
     """
     all_repositories = []
-    current_url = "https://api.github.com/repositories"
     params = {"per_page": per_page}
     if since_id is not None:
         params["since"] = since_id
+
+    current_url = "repositories"
 
     while current_url:
         try:
@@ -121,12 +131,12 @@ class GitHubAPI:
             'Accept': 'application/vnd.github.v3+json'
         })
 
-    def _make_request(self, url: str, method: str = 'GET', **kwargs) -> Dict:
+    def _make_request(self, endpoint: str, method: str = 'GET', **kwargs) -> Dict:
         """
         Make API request with rate limiting and error handling.
         
         Args:
-            url: API endpoint URL
+            endpoint: API endpoint (e.g. 'repositories' or 'rate_limit')
             method: HTTP method
             **kwargs: Additional request parameters
             
@@ -136,6 +146,12 @@ class GitHubAPI:
         Raises:
             requests.exceptions.RequestException: If request fails
         """
+        # Handle full URLs vs endpoint names
+        if endpoint.startswith('http'):
+            url = endpoint
+        else:
+            url = f"{GITHUB_API_BASE}/{endpoint}"
+            
         # Implement rate limiting
         now = time.time()
         time_since_last_call = now - self.last_api_call
@@ -153,7 +169,7 @@ class GitHubAPI:
                 if wait_time > 0:
                     print(f"Rate limit hit. Waiting {wait_time:.2f} seconds")
                     time.sleep(wait_time)
-                    return self._make_request(url, method, **kwargs)
+                    return self._make_request(endpoint, method, **kwargs)
                     
             response.raise_for_status()
             return response.json()
@@ -164,28 +180,23 @@ class GitHubAPI:
 
     def get_repository(self, full_name: str) -> Dict:
         """Get repository information."""
-        url = f"https://api.github.com/repos/{full_name}"
-        return self._make_request(url)
+        return self._make_request(f"repos/{full_name}")
 
     def get_user(self, username: str) -> Dict:
         """Get user information."""
-        url = f"https://api.github.com/users/{username}"
-        return self._make_request(url)
+        return self._make_request(f"users/{username}")
 
     def get_commit(self, repo_name: str, sha: str) -> Dict:
         """Get commit information."""
-        url = f"https://api.github.com/repos/{repo_name}/commits/{sha}"
-        return self._make_request(url)
+        return self._make_request(f"repos/{repo_name}/commits/{sha}")
 
     def get_pull_request(self, repo_name: str, number: int) -> Dict:
         """Get pull request information."""
-        url = f"https://api.github.com/repos/{repo_name}/pulls/{number}"
-        return self._make_request(url)
+        return self._make_request(f"repos/{repo_name}/pulls/{number}")
 
     def get_issue(self, repo_name: str, number: int) -> Dict:
         """Get issue information."""
-        url = f"https://api.github.com/repos/{repo_name}/issues/{number}"
-        return self._make_request(url)
+        return self._make_request(f"repos/{repo_name}/issues/{number}")
 
     def get_contributors(self, repo_name: str) -> List[Dict]:
         """
@@ -197,38 +208,7 @@ class GitHubAPI:
         Returns:
             List[Dict]: List of contributor information
         """
-        url = f"https://api.github.com/repos/{repo_name}/contributors"
-        contributors = self._make_request(url)
-        
-        # Enrich contributor data with additional information
-        for contributor in contributors:
-            try:
-                # Get detailed user information
-                user_data = self.get_user(contributor['login'])
-                
-                # Add additional fields
-                contributor.update({
-                    'name': user_data.get('name'),
-                    'email': user_data.get('email'),
-                    'company': user_data.get('company'),
-                    'location': user_data.get('location'),
-                    'created_at': user_data.get('created_at'),
-                    'updated_at': user_data.get('updated_at')
-                })
-                
-                # Get commit statistics
-                stats_url = f"{url}/{contributor['login']}/stats"
-                try:
-                    stats = self._make_request(stats_url)
-                    contributor['commit_stats'] = stats
-                except requests.exceptions.RequestException:
-                    print(f"Failed to get commit stats for {contributor['login']}")
-                    
-            except requests.exceptions.RequestException:
-                print(f"Failed to get user data for {contributor['login']}")
-                continue
-                
-        return contributors
+        return self._make_request(f"repos/{repo_name}/contributors")
 
     def get_repository_statistics(self, repo_name: str) -> Dict:
         """

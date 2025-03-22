@@ -1,125 +1,134 @@
 """Tests for GitHub Archive processing functionality."""
 
 import unittest
-from datetime import datetime, timedelta
+from unittest.mock import patch, MagicMock
+from datetime import datetime
 from pathlib import Path
 import tempfile
-import shutil
-from unittest.mock import Mock, patch
-
-from src.github_database.github_archive.github_archive import (
-    GitHubArchiveProcessor,
-    QualityFilters,
-    RepositoryMetrics
-)
+import gzip
+import json
+import responses
+from src.github_database.github_archive.github_archive import GitHubArchiveProcessor
 
 class TestGitHubArchiveProcessor(unittest.TestCase):
     """Test cases for GitHubArchiveProcessor class."""
     
     def setUp(self):
         """Set up test environment."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.mock_api = Mock()
-        self.mock_db = Mock()
-        
-        # Create processor with temporary cache directory
-        self.processor = GitHubArchiveProcessor(self.mock_api, self.mock_db)
-        self.processor.CACHE_DIR = Path(self.temp_dir)
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.processor = GitHubArchiveProcessor(cache_dir=self.temp_dir)
+        self.test_date = datetime(2025, 3, 20)
         
     def tearDown(self):
         """Clean up test environment."""
-        shutil.rmtree(self.temp_dir)
+        for file in self.temp_dir.glob("*"):
+            file.unlink()
+        self.temp_dir.rmdir()
         
-    @patch('requests.get')
-    def test_download_daily_archive(self, mock_get):
-        """Test downloading daily archive files."""
-        # Mock successful download
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.iter_content.return_value = [b'test data']
+    def test_get_archive_urls(self):
+        """Test URL generation for archives."""
+        urls = self.processor.get_archive_urls(self.test_date)
+        self.assertEqual(len(urls), 24)  # One URL per hour
         
-        date = datetime(2024, 1, 1)
-        files = self.processor.download_daily_archive(date)
-        
-        self.assertEqual(len(files), 24)  # 24 hourly files
-        self.assertTrue(all(f.exists() for f in files))
-        
-    def test_filter_events_by_repo_quality(self):
-        """Test filtering events based on repository quality."""
-        # Sample test data
-        events = [
-            {'repo': {'id': 1}, 'type': 'PushEvent'},
-            {'repo': {'id': 2}, 'type': 'PullRequestEvent'},
+        # Check URL format
+        expected_base = "https://data.gharchive.org/2025-03-20"
+        for hour, url in enumerate(urls):
+            self.assertEqual(url, f"{expected_base}-{hour}.json.gz")
+            
+    @responses.activate
+    def test_stream_events(self):
+        """Test event streaming from archive."""
+        # Create test data
+        test_events = [
+            {"type": "PushEvent", "id": "1"},
+            {"type": "PullRequestEvent", "id": "2"}
         ]
         
-        # Mock repository metrics
-        self.processor.fetch_repo_metrics = Mock(return_value={
-            1: RepositoryMetrics(
-                id=1,
-                stars=100,
-                forks=20,
-                commits_last_year=150,
-                language='Python',
-                last_updated=datetime.now()
-            ),
-            2: RepositoryMetrics(
-                id=2,
-                stars=10,  # Below threshold
-                forks=5,   # Below threshold
-                commits_last_year=50,  # Below threshold
-                language='JavaScript',
-                last_updated=datetime.now()
-            )
-        })
+        # Prepare mock response
+        hour = 0
+        url = f"https://data.gharchive.org/2025-03-20-{hour}.json.gz"
         
-        filters = QualityFilters(
-            min_stars=50,
-            min_forks=10,
-            min_commits_last_year=100
+        # Create gzipped content
+        content = "\n".join(json.dumps(event) for event in test_events)
+        gzipped_content = gzip.compress(content.encode())
+        
+        responses.add(
+            responses.GET,
+            url,
+            body=gzipped_content,
+            status=200,
+            content_type="application/gzip"
         )
         
-        filtered_events = self.processor.filter_events_by_repo_quality(events, filters)
+        # Test streaming
+        events = list(self.processor.stream_events(self.test_date))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["type"], "PushEvent")
+        self.assertEqual(events[1]["type"], "PullRequestEvent")
         
-        self.assertEqual(len(filtered_events), 1)
-        self.assertEqual(filtered_events[0]['repo']['id'], 1)
+    def test_cache_functionality(self):
+        """Test caching of downloaded files."""
+        # Create test file in cache
+        test_file = self.temp_dir / "2025-03-20-0.json.gz"
+        test_events = [
+            {"type": "PushEvent", "id": "1"},
+            {"type": "PullRequestEvent", "id": "2"}
+        ]
         
-    def test_innovation_classification(self):
-        """Test classification of innovation-relevant events."""
-        # Test new project creation
-        create_event = {
-            'type': 'CreateEvent',
-            'payload': {'ref_type': 'repository'}
-        }
-        self.assertEqual(
-            self.processor._classify_innovation_event(create_event),
-            'new_project'
-        )
+        content = "\n".join(json.dumps(event) for event in test_events)
+        with gzip.open(test_file, "wt") as f:
+            f.write(content)
+            
+        # Stream events (should use cache)
+        events = list(self.processor._process_cached_file(test_file))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["type"], "PushEvent")
         
-        # Test feature innovation in PR
-        pr_event = {
-            'type': 'PullRequestEvent',
-            'payload': {
-                'pull_request': {
-                    'title': 'Implement new AI feature',
-                    'body': 'This PR introduces a new machine learning component'
-                }
-            }
-        }
-        self.assertEqual(
-            self.processor._classify_innovation_event(pr_event),
-            'feature_innovation'
-        )
+    def test_clean_cache(self):
+        """Test cache cleaning functionality."""
+        # Create old and new test files
+        old_file = self.temp_dir / "old.json.gz"
+        new_file = self.temp_dir / "new.json.gz"
         
-        # Test major release
-        release_event = {
-            'type': 'ReleaseEvent',
-            'payload': {
-                'release': {'tag_name': 'v2.0.0'}
-            }
-        }
-        self.assertEqual(
-            self.processor._classify_innovation_event(release_event),
-            'major_release'
-        )
+        old_file.touch()
+        new_file.touch()
         
+        # Set old file's mtime to 10 days ago
+        old_timestamp = (datetime.now().timestamp() - (10 * 24 * 60 * 60))
+        old_file.stat().st_mtime = old_timestamp
+        
+        # Clean cache with 7 days max age
+        self.processor.clean_cache(max_age_days=7)
+        
+        # Check results
+        self.assertFalse(old_file.exists())
+        self.assertTrue(new_file.exists())
+        
+    def test_get_event_counts(self):
+        """Test event counting functionality."""
+        test_events = [
+            {"type": "PushEvent", "id": "1"},
+            {"type": "PushEvent", "id": "2"},
+            {"type": "PullRequestEvent", "id": "3"}
+        ]
+        
+        # Mock stream_events to return test data
+        with patch.object(self.processor, 'stream_events', return_value=test_events):
+            counts = self.processor.get_event_counts(self.test_date)
+            
+            self.assertEqual(counts["PushEvent"], 2)
+            self.assertEqual(counts["PullRequestEvent"], 1)
+            
+    def test_error_handling(self):
+        """Test error handling in event processing."""
+        # Create corrupted gzip file
+        test_file = self.temp_dir / "corrupted.json.gz"
+        with open(test_file, "wb") as f:
+            f.write(b"corrupted data")
+            
+        # Test processing of corrupted file
+        events = list(self.processor._process_cached_file(test_file))
+        self.assertEqual(len(events), 0)  # Should handle error and return empty list
+
 if __name__ == '__main__':
     unittest.main()

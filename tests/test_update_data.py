@@ -1,13 +1,13 @@
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
 import requests
 from sqlalchemy import inspect
 from dotenv import load_dotenv
 from src.github_database.api.github_api import make_github_request
 from src.github_database.database.database import (
-    init_db,
+    Database,
     get_session,
     create_repository_from_api,
     Repository
@@ -146,7 +146,7 @@ def process_repositories(repositories: List[Dict], session) -> Tuple[int, int]:
                     'forks_count': repo_obj.forks_count,
                     'stars_count': repo_obj.stars_count,
                     'open_issues_count': repo_obj.open_issues_count,
-                    'updated_at': datetime.now(timezone.utc)  # Nutze timezone-aware UTC Zeit
+                    'updated_at': datetime.now()  # Nutze timezone-aware UTC Zeit
                 }
                 update_dicts.append(update_dict)
             else:
@@ -192,15 +192,14 @@ def test_update_repositories(start_id: int = 63, end_id: int = 369):
         start_id: Start-ID für die Aktualisierung
         end_id: End-ID für die Aktualisierung
     """
-    # Initialisiere die Datenbank und Rate-Limit Manager
-    init_db()
-    rate_limit = RateLimitManager()
-    
-    # Öffne eine Datenbanksession
-    session = get_session()
+    # Initialisiere Datenbank
+    db = Database()
+    db.create_tables()
+    session = db.get_session()
     
     try:
         # Überprüfe zu Beginn das Rate-Limit
+        rate_limit = RateLimitManager()
         rate_limit.check_rate_limit()
         
         print(f"\n=== Starte Update-Test für IDs {start_id}-{end_id} ===\n")

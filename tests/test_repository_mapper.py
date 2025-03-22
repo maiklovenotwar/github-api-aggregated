@@ -2,7 +2,7 @@
 
 import unittest
 from datetime import datetime
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock, MagicMock, patch
 from sqlalchemy.orm import Session
 
 from src.github_database.mapping.repository_mapper import (
@@ -80,18 +80,101 @@ class TestRepositoryMapper(unittest.TestCase):
     """Test cases for RepositoryMapper."""
     
     def setUp(self):
-        """Set up test environment."""
+        """Set up test fixtures."""
         self.session = Mock(spec=Session)
-        self.config = Mock(spec=ETLConfig)
-        self.mapper = RepositoryMapper(self.session, self.config)
         
-        # Mock repository and user queries
+        # Create mock ETLConfig
+        self.config = Mock(spec=ETLConfig)
+        self.config.database = Mock()
+        self.config.database.url = '/tmp/test.db'
+        self.config.api = Mock()
+        self.config.api.token = 'test-token'
+        self.config.api.base_url = 'https://api.github.com'
+        
+        # Mock repository and user
         self.mock_repo = Mock(spec=Repository)
         self.mock_repo.id = 1
         self.mock_user = Mock(spec=User)
         self.mock_user.id = 1
         
-        self.session.query().get.side_effect = [self.mock_repo, self.mock_user]
+        # Configure session mock
+        mock_query = Mock()
+        mock_query.get.return_value = None  # Simulate no existing records
+        self.session.query.return_value = mock_query
+        
+        # Create mock enricher
+        self.enricher = Mock()
+        
+        # Mock enricher methods
+        def enrich_repository(repo_dict):
+            return {
+                'id': repo_dict['id'],
+                'name': repo_dict['name'],
+                'description': 'Test repo',
+                'language': 'Python',
+                'stars': 10,
+                'forks': 5
+            }
+            
+        def enrich_user(user_dict):
+            return {
+                'id': user_dict['id'],
+                'login': user_dict.get('login', 'unknown'),
+                'name': 'Test User',
+                'email': 'test@example.com'
+            }
+            
+        def enrich_commit(commit_dict, repo_name):
+            return {
+                'sha': commit_dict['sha'],
+                'message': commit_dict['message'],
+                'author': {
+                    'id': 1,
+                    'login': 'test',
+                    'name': commit_dict['author']['name'],
+                    'email': commit_dict['author']['email']
+                }
+            }
+            
+        def enrich_issue(issue_dict, repo_name):
+            return {
+                'id': issue_dict['id'],
+                'number': issue_dict['number'],
+                'title': issue_dict['title'],
+                'body': issue_dict['body'],
+                'state': issue_dict['state'],
+                'user': {
+                    'id': issue_dict['user']['id'],
+                    'login': 'test'
+                },
+                'created_at': issue_dict['created_at'],
+                'updated_at': issue_dict['updated_at']
+            }
+            
+        def enrich_pull_request(pr_dict, repo_name):
+            return {
+                'id': pr_dict['id'],
+                'number': pr_dict['number'],
+                'title': pr_dict['title'],
+                'body': pr_dict['body'],
+                'state': pr_dict['state'],
+                'user': {
+                    'id': pr_dict['user']['id'],
+                    'login': 'test'
+                },
+                'created_at': pr_dict['created_at'],
+                'updated_at': pr_dict['updated_at'],
+                'base': pr_dict['base'],
+                'head': pr_dict['head']
+            }
+            
+        self.enricher.enrich_repository.side_effect = enrich_repository
+        self.enricher.enrich_user.side_effect = enrich_user
+        self.enricher.enrich_commit.side_effect = enrich_commit
+        self.enricher.enrich_issue.side_effect = enrich_issue
+        self.enricher.enrich_pull_request.side_effect = enrich_pull_request
+        
+        self.mapper = RepositoryMapper(self.session, self.config, self.enricher)
         
     def test_map_push_event(self):
         """Test mapping of PushEvent."""
@@ -218,7 +301,7 @@ class TestRepositoryMapper(unittest.TestCase):
         
         self.assertEqual(event_obj.type, 'ForkEvent')
         self.assertEqual(fork.parent_id, 1)
-        self.assertEqual(fork.fork_id, 2)
+        self.assertEqual(fork.repository_id, 2)
         
     def test_map_star_event(self):
         """Test mapping of StarEvent."""

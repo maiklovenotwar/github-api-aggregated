@@ -1,154 +1,135 @@
-"""Tests for ETL Orchestrator."""
+"""Tests for ETL orchestration functionality."""
 
 import unittest
-from datetime import datetime, timedelta
-from pathlib import Path
+from unittest.mock import patch, MagicMock, call
+from datetime import datetime
 import tempfile
-import shutil
-from unittest.mock import Mock, patch, MagicMock
+from pathlib import Path
 
-from src.github_database.config import (
-    ETLConfig,
-    APIConfig,
-    ArchiveConfig,
-    DatabaseConfig,
-    QualityThresholds,
-    ProcessingState
-)
 from src.github_database.etl_orchestrator import ETLOrchestrator
+from src.github_database.config import ETLConfig
 
 class TestETLOrchestrator(unittest.TestCase):
-    """Test cases for ETLOrchestrator."""
+    """Test cases for ETLOrchestrator class."""
     
     def setUp(self):
         """Set up test environment."""
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = Path(tempfile.mkdtemp())
         self.config = ETLConfig(
-            quality=QualityThresholds(
-                min_stars=50,
-                min_forks=10,
-                min_commits_last_year=100
-            ),
-            api=APIConfig(token="test_token"),
-            archive=ArchiveConfig(cache_dir=Path(self.temp_dir)),
-            database=DatabaseConfig(url="sqlite:///:memory:"),
-            start_date=datetime.now() - timedelta(days=1),
-            end_date=datetime.now(),
-            state_file=Path(self.temp_dir) / "state.json"
+            cache_dir=str(self.temp_dir),
+            batch_size=100,
+            github_token="test_token",
+            database_url="sqlite:///:memory:"
         )
-        
-        # Mock components
-        self.mock_github_api = Mock()
-        self.mock_database = Mock()
-        self.mock_archive_processor = Mock()
-        
-        # Create orchestrator
         self.orchestrator = ETLOrchestrator(self.config)
-        self.orchestrator.github_api = self.mock_github_api
-        self.orchestrator.database = self.mock_database
-        self.orchestrator.archive_processor = self.mock_archive_processor
         
     def tearDown(self):
         """Clean up test environment."""
-        shutil.rmtree(self.temp_dir)
+        for file in self.temp_dir.glob("*"):
+            file.unlink()
+        self.temp_dir.rmdir()
         
-    def test_process_archives(self):
-        """Test archive processing workflow."""
-        # Mock archive data
-        mock_events = [
-            {
-                'id': '1',
-                'type': 'PushEvent',
-                'actor': {'id': 1},
-                'repo': {'id': 1},
-                'payload': {},
-                'created_at': '2024-01-01T00:00:00Z',
-                'public': True
-            }
-        ]
+    def test_initialization(self):
+        """Test proper initialization of components."""
+        self.assertIsNotNone(self.orchestrator.archive_processor)
+        self.assertIsNotNone(self.orchestrator.batch_processor)
+        self.assertIsNotNone(self.orchestrator.data_validator)
+        self.assertIsNotNone(self.orchestrator.data_enricher)
         
-        self.mock_archive_processor.download_daily_archive.return_value = [
-            Path("test1.json.gz")
-        ]
-        self.mock_archive_processor.process_archive_file.return_value = mock_events
-        self.mock_archive_processor.filter_events_by_repo_quality.return_value = mock_events
+    @patch('src.github_database.etl_orchestrator.GitHubArchiveProcessor')
+    @patch('src.github_database.etl_orchestrator.BatchProcessor')
+    @patch('src.github_database.etl_orchestrator.DataValidator')
+    @patch('src.github_database.etl_orchestrator.DataEnricher')
+    def test_process_single_date(self, mock_enricher, mock_validator, mock_processor, mock_archive):
+        """Test processing of a single date."""
+        # Setup mock data
+        test_date = datetime(2025, 3, 20)
+        test_events = [{"id": "1"}, {"id": "2"}]
         
-        # Create mock session
-        mock_session = MagicMock()
-        self.mock_database.get_session.return_value.__enter__.return_value = mock_session
+        # Configure mocks
+        mock_archive.return_value.stream_events.return_value = test_events
+        mock_validator.return_value.validate_events.return_value = test_events
+        mock_enricher.return_value.batch_enrich_events.return_value = test_events
         
-        # Run processing
-        self.orchestrator._process_archives()
+        # Process date
+        self.orchestrator.process_single_date(test_date)
         
         # Verify calls
-        self.mock_archive_processor.download_daily_archive.assert_called()
-        self.mock_archive_processor.process_archive_file.assert_called()
-        self.mock_archive_processor.filter_events_by_repo_quality.assert_called()
-        mock_session.execute.assert_called()  # Verify bulk insert
+        mock_validator.return_value.validate_events.assert_called_once()
+        mock_enricher.return_value.batch_enrich_events.assert_called_once()
+        mock_processor.return_value.process_event_batch.assert_called_once()
         
-    def test_enrich_with_api_data(self):
-        """Test API data enrichment."""
-        # Mock repository data
-        mock_repo = Mock(id=1, stars=None)
-        mock_session = MagicMock()
-        mock_session.query().filter().all.return_value = [(1,)]
-        mock_session.query().get.return_value = mock_repo
+    def test_process_date_range(self):
+        """Test processing of date range."""
+        start_date = datetime(2025, 3, 20)
+        end_date = datetime(2025, 3, 21)
         
-        self.mock_database.get_session.return_value.__enter__.return_value = mock_session
-        
-        # Mock API response
-        self.mock_archive_processor.fetch_repo_metrics.return_value = {
-            1: Mock(
-                stars=100,
-                forks=20,
-                language='Python'
-            )
+        with patch.object(self.orchestrator, 'process_single_date') as mock_process:
+            self.orchestrator.process_date_range(start_date, end_date)
+            
+            # Should be called twice (one for each day)
+            self.assertEqual(mock_process.call_count, 2)
+            mock_process.assert_has_calls([
+                call(datetime(2025, 3, 20)),
+                call(datetime(2025, 3, 21))
+            ])
+            
+    def test_get_processing_metrics(self):
+        """Test metrics collection."""
+        # Mock batch processor metrics
+        mock_metrics = {
+            "events_processed": 100,
+            "api_calls": 50,
+            "db_operations": 75,
+            "errors": 5,
+            "throughput": 10.5,
+            "memory_usage_mb": 256,
+            "processing_time_seconds": 9.5
         }
         
-        # Run enrichment
-        self.orchestrator._enrich_with_api_data()
-        
-        # Verify repository was updated
-        self.assertEqual(mock_repo.stars, 100)
-        self.assertEqual(mock_repo.forks, 20)
-        self.assertEqual(mock_repo.language, 'Python')
-        
-    def test_state_management(self):
-        """Test processing state management."""
-        # Create initial state
-        initial_state = ProcessingState(
-            last_processed_date=datetime(2024, 1, 1),
-            last_processed_hour=5,
-            processed_repo_ids={1, 2},
-            failed_repo_ids={3},
-            event_counts={'PushEvent': 10}
-        )
-        
-        # Save state
-        self.config.save_state(initial_state)
-        
-        # Create new orchestrator to load state
-        new_orchestrator = ETLOrchestrator(self.config)
-        
-        # Verify state was loaded correctly
-        loaded_state = new_orchestrator.state
-        self.assertEqual(loaded_state.last_processed_date, initial_state.last_processed_date)
-        self.assertEqual(loaded_state.last_processed_hour, initial_state.last_processed_hour)
-        self.assertEqual(loaded_state.processed_repo_ids, initial_state.processed_repo_ids)
-        self.assertEqual(loaded_state.failed_repo_ids, initial_state.failed_repo_ids)
-        self.assertEqual(loaded_state.event_counts, initial_state.event_counts)
-        
-    def test_error_handling(self):
-        """Test error handling and recovery."""
-        # Mock error in archive processing
-        self.mock_archive_processor.download_daily_archive.side_effect = Exception("Test error")
-        
-        # Verify error is logged and state is saved
-        with self.assertRaises(Exception):
-            self.orchestrator.run()
+        with patch.object(self.orchestrator.batch_processor, 'get_metrics', 
+                         return_value=MagicMock(**mock_metrics)):
+            metrics = self.orchestrator.get_processing_metrics()
             
-        # Verify state was saved despite error
-        self.assertTrue(self.config.state_file.exists())
+            self.assertEqual(metrics["events_processed"], 100)
+            self.assertEqual(metrics["api_calls"], 50)
+            self.assertEqual(metrics["db_operations"], 75)
+            self.assertEqual(metrics["errors"], 5)
+            self.assertEqual(metrics["throughput"], 10.5)
+            self.assertEqual(metrics["memory_usage_mb"], 256)
+            self.assertEqual(metrics["processing_time_seconds"], 9.5)
+            
+    def test_error_handling(self):
+        """Test error handling during processing."""
+        test_date = datetime(2025, 3, 20)
         
+        # Mock stream_event_batches to raise an exception
+        with patch.object(self.orchestrator, '_stream_event_batches', 
+                         side_effect=Exception("Test error")):
+            # Should not raise exception
+            self.orchestrator.process_single_date(test_date)
+            
+    def test_cleanup(self):
+        """Test cleanup functionality."""
+        with patch.object(self.orchestrator.archive_processor, 'clean_cache') as mock_clean:
+            self.orchestrator.cleanup()
+            mock_clean.assert_called_once()
+            
+    def test_stream_event_batches(self):
+        """Test event batch streaming."""
+        test_date = datetime(2025, 3, 20)
+        test_events = [{"id": str(i)} for i in range(150)]  # 150 events
+        
+        # Mock stream_events to return test data
+        with patch.object(self.orchestrator.archive_processor, 'stream_events',
+                         return_value=test_events):
+            # Get batches (batch_size=100 from config)
+            batches = list(self.orchestrator._stream_event_batches(test_date))
+            
+            # Should have 2 batches (100 and 50 events)
+            self.assertEqual(len(batches), 2)
+            self.assertEqual(len(batches[0]), 100)
+            self.assertEqual(len(batches[1]), 50)
+
 if __name__ == '__main__':
     unittest.main()
