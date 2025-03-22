@@ -179,14 +179,51 @@ class DataValidator:
         author_fields = {'name', 'email'}
         return all(field in author for field in author_fields)
 
-def validate_repositories():
-    """Validate repository data in the database."""
+def validate_repository(repository: Repository) -> bool:
+    """
+    Validate a single repository.
+    
+    Args:
+        repository: Repository object to validate
+        
+    Returns:
+        bool: True if repository is valid
+    """
+    # Check required fields
+    if not repository.id or not repository.name or not repository.full_name:
+        logger.warning(f"Repository {repository.id} missing required fields")
+        return False
+        
+    # Check numeric fields are non-negative
+    if repository.stars_count < 0 or repository.forks_count < 0:
+        logger.warning(f"Repository {repository.id} has negative counts")
+        return False
+        
+    # Check timestamps
+    if not repository.created_at or not repository.updated_at:
+        logger.warning(f"Repository {repository.id} missing timestamps")
+        return False
+        
+    if repository.updated_at < repository.created_at:
+        logger.warning(f"Repository {repository.id} has invalid timestamps")
+        return False
+        
+    return True
+
+def validate_repositories() -> bool:
+    """
+    Validate all repositories in the database.
+    
+    Returns:
+        bool: True if all repositories are valid
+    """
     session = get_session()
     try:
         repositories = session.query(Repository).all()
         for repo in repositories:
-            if not repo.name or not repo.full_name:
-                logger.warning(f"Repository {repo.id} has missing required fields")
+            if not validate_repository(repo):
+                return False
+        return True
     finally:
         session.close()
 

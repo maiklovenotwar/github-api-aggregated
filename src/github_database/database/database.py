@@ -1,11 +1,15 @@
 """Database models and utilities."""
 
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Boolean, Text
+import json
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Table, Boolean, Text, UniqueConstraint, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
-from sqlalchemy.types import TypeDecorator, JSON
+from sqlalchemy.types import TypeDecorator, Text
 import os
+from typing import List, Optional
+from dataclasses import dataclass
+from uuid import UUID
 
 Base = declarative_base()
 
@@ -13,7 +17,7 @@ Base = declarative_base()
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'github.db')
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-# Custom JSON type that works with SQLite
+# Custom JSON type that works with both SQLite and MySQL
 class JSONType(TypeDecorator):
     """Represents an immutable structure as a json-encoded string."""
 
@@ -22,12 +26,12 @@ class JSONType(TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
-            value = JSON().process_bind_param(value, dialect)
+            value = json.dumps(value)
         return value
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            value = JSON().process_result_value(value, dialect)
+            value = json.loads(value)
         return value
 
 # Association tables
@@ -37,15 +41,74 @@ contributor_repository = Table(
     Column('repository_id', Integer, ForeignKey('repositories.id'))
 )
 
+@dataclass
+class CommitData:
+    """Git commit data."""
+    sha: str
+    message: str
+    author_name: str
+    author_email: str
+
+@dataclass
+class PushEventData:
+    """Push event data."""
+    ref: str
+    commits: List[CommitData]
+
+@dataclass
+class PullRequestEventData:
+    """Pull request event data."""
+    action: str
+    number: int
+    title: str
+    body: str
+    state: str
+
+@dataclass
+class IssueEventData:
+    """Issue event data."""
+    action: str
+    number: int
+    title: str
+    body: str
+    state: str
+
+@dataclass
+class ForkEventData:
+    """Fork event data."""
+    fork_id: int
+    fork_name: str
+
+@dataclass
+class WatchEventData:
+    """Watch event data."""
+    action: str
+
+@dataclass
+class EventData:
+    """Base event class."""
+    id: str
+    type: str
+    actor_id: int
+    actor_login: str
+    repository_id: int
+    repository_name: str
+    created_at: datetime
+    push_data: Optional[PushEventData] = None
+    pull_request_data: Optional[PullRequestEventData] = None
+    issue_data: Optional[IssueEventData] = None
+    fork_data: Optional[ForkEventData] = None
+    watch_data: Optional[WatchEventData] = None
+
 class Event(Base):
     """GitHub event model."""
     
     __tablename__ = 'events'
     
     id = Column(Integer, primary_key=True)
-    event_id = Column(String, unique=True)
+    event_id = Column(String, nullable=False, unique=True)  # Now using UUID-based IDs
     type = Column(String)
-    actor_id = Column(Integer, ForeignKey('users.id'))
+    actor_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     repo_id = Column(Integer, ForeignKey('repositories.id'))
     payload = Column(JSONType)
     public = Column(Boolean, default=True)
@@ -53,6 +116,14 @@ class Event(Base):
     
     actor = relationship('User', foreign_keys=[actor_id], back_populates='events')
     repository = relationship('Repository', foreign_keys=[repo_id], back_populates='events')
+
+    __table_args__ = (
+        UniqueConstraint('event_id', 'actor_id', name='uix_event_actor'),
+        Index('ix_events_event_id', 'event_id'),
+        Index('ix_events_actor_id', 'actor_id'),
+        Index('ix_events_repo_id', 'repo_id'),
+        Index('ix_events_created_at', 'created_at'),
+    )
 
 class User(Base):
     """User model."""
@@ -200,7 +271,7 @@ class Watch(Base):
     id = Column(Integer, primary_key=True)
     repository_id = Column(Integer, ForeignKey('repositories.id'))
     user_id = Column(Integer, ForeignKey('users.id'))
-    watched_at = Column(DateTime)
+    watched_at = Column(DateTime, default=datetime.utcnow)
     
     repository = relationship('Repository', back_populates='watches')
     user = relationship('User', back_populates='watches')
@@ -243,7 +314,7 @@ def init_db(url=None):
     create_tables(url)
     return get_session(url)
 
-def create_repository_from_api(api_data):
+def create_repository_from_api(api_data: dict) -> Repository:
     """
     Create a Repository object from GitHub API data.
     
@@ -253,7 +324,7 @@ def create_repository_from_api(api_data):
     Returns:
         Repository: New Repository object
     """
-    return Repository(
+    repo = Repository(
         id=api_data['id'],
         name=api_data['name'],
         full_name=api_data['full_name'],
@@ -261,11 +332,13 @@ def create_repository_from_api(api_data):
         language=api_data.get('language'),
         stars_count=api_data.get('stargazers_count', 0),
         forks_count=api_data.get('forks_count', 0),
-        created_at=api_data.get('created_at'),
-        updated_at=api_data.get('updated_at')
+        created_at=datetime.strptime(api_data['created_at'], '%Y-%m-%dT%H:%M:%SZ'),
+        updated_at=datetime.strptime(api_data['updated_at'], '%Y-%m-%dT%H:%M:%SZ'),
+        owner_id=api_data['owner']['id']
     )
+    return repo
 
-def create_user_from_api(api_data):
+def create_user_from_api(api_data: dict) -> User:
     """
     Create a User object from GitHub API data.
     
@@ -275,16 +348,17 @@ def create_user_from_api(api_data):
     Returns:
         User: New User object
     """
-    return User(
+    user = User(
         id=api_data['id'],
         login=api_data['login'],
         name=api_data.get('name'),
         email=api_data.get('email'),
-        created_at=api_data.get('created_at'),
-        updated_at=api_data.get('updated_at')
+        created_at=datetime.strptime(api_data['created_at'], '%Y-%m-%dT%H:%M:%SZ') if 'created_at' in api_data else None,
+        updated_at=datetime.strptime(api_data['updated_at'], '%Y-%m-%dT%H:%M:%SZ') if 'updated_at' in api_data else None
     )
+    return user
 
-def create_event_from_api(api_data):
+def create_event_from_api(api_data: dict) -> Event:
     """
     Create an Event object from GitHub API data.
     
@@ -294,12 +368,13 @@ def create_event_from_api(api_data):
     Returns:
         Event: New Event object
     """
-    return Event(
-        event_id=api_data['id'],
+    event = Event(
+        event_id=str(UUID(api_data['id'])),  # Convert to UUID-based ID
         type=api_data['type'],
-        actor_id=api_data['actor']['id'] if api_data.get('actor') else None,
-        repo_id=api_data['repo']['id'] if api_data.get('repo') else None,
-        payload=api_data.get('payload', {}),
-        public=api_data.get('public', True),
-        created_at=api_data.get('created_at')
+        actor_id=api_data['actor']['id'],
+        repo_id=api_data['repo']['id'],
+        payload=api_data['payload'],
+        public=api_data['public'],
+        created_at=datetime.strptime(api_data['created_at'], '%Y-%m-%dT%H:%M:%SZ')
     )
+    return event

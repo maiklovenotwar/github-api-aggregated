@@ -1,11 +1,12 @@
 # GitHub Data Analytics Pipeline
 
-Ein hochperformantes ETL-System zur Analyse von GitHub-Aktivitätsdaten durch Integration von GitHub Archive und GitHub API.
+Ein hochperformantes ETL-System zur Analyse von GitHub-Aktivitätsdaten durch hybride Integration von GitHub API und BigQuery.
 
 ## 🌟 Features
 
-- Effiziente Verarbeitung von GitHub Archive Events
-- Anreicherung mit GitHub API-Daten
+- Hybride Datenerfassung (GitHub API + BigQuery)
+- Effiziente Verarbeitung von GitHub Archive Events via BigQuery
+- Anreicherung mit GitHub API-Metadaten
 - Parallele Batch-Verarbeitung
 - Intelligentes Caching-System
 - Performance-Monitoring und Visualisierung
@@ -20,84 +21,74 @@ github-api/
 │       ├── api/                    # GitHub API Integration
 │       │   └── github_api.py       # API-Client und Rate-Limiting
 │       │
+│       ├── bigquery/              # BigQuery Integration
+│       │   ├── bigquery_client.py # BigQuery-Client für GitHub Archive
+│       │   ├── event_parser.py    # Event-Parsing von BigQuery-Daten
+│       │   └── query_builder.py   # SQL-Query-Generator
+│       │
 │       ├── database/              # Datenbankmodelle und Verwaltung
-│       │   ├── database.py        # SQLAlchemy-Modelle und Datenbankinitialisierung
+│       │   ├── database.py        # SQLAlchemy-Modelle
 │       │   └── migrations/        # Alembic Migrationsskripte
 │       │
 │       ├── enrichment/            # Datenanreicherung
 │       │   └── data_enricher.py   # Anreicherung mit API-Daten
 │       │
-│       ├── github_archive/        # GitHub Archive Verarbeitung
-│       │   └── github_archive.py  # Download und Parsing von Archivdaten
-│       │
-│       ├── mapping/              # Event-Mapping
-│       │   └── repository_mapper.py # Mapping von Events zu Datenbankmodellen
+│       ├── config/               # Konfiguration
+│       │   ├── config.py         # Hauptkonfiguration
+│       │   └── bigquery_config.py # BigQuery-spezifische Konfiguration
 │       │
 │       ├── monitoring/           # Performance-Überwachung
 │       │   └── performance_monitor.py # Metriken und Visualisierung
 │       │
-│       ├── processing/           # Datenverarbeitung
-│       │   └── batch_processor.py # Effiziente Batch-Verarbeitung
-│       │
-│       ├── config.py            # Konfigurationsverwaltung
-│       ├── etl_orchestrator.py  # ETL-Prozesssteuerung
+│       ├── etl_orchestrator.py  # Hybride ETL-Prozesssteuerung
 │       └── main.py             # Hauptanwendung
 │
-├── tests/                      # Unittest-Suite
-├── requirements.txt           # Python-Abhängigkeiten
-└── README.md                 # Projektdokumentation
+├── docs/                       # Dokumentation
+│   ├── ARCHITECTURE.md        # Systemarchitektur
+│   ├── BIGQUERY_SETUP.md      # BigQuery-Einrichtung
+│   └── USAGE.md              # Nutzungsanleitungen
+│
+├── tests/                     # Testsuite
+│   ├── test_hybrid_pipeline.py # Tests für hybride Pipeline
+│   └── analyze_test_results.py # Testanalyse und Visualisierung
+│
+├── .env.template             # Umgebungsvariablen-Template
+├── requirements.txt          # Python-Abhängigkeiten
+└── README.md                # Projektdokumentation
 ```
 
 ## 🔑 Hauptkomponenten
 
-### ETL Orchestrator
+### Hybride ETL-Pipeline
 - **Datei**: `etl_orchestrator.py`
-- **Funktion**: Zentrale Steuerung des ETL-Prozesses
+- **Funktion**: Orchestrierung der hybriden Datenerfassung
 - **Features**:
-  - Streaming-Verarbeitung von Archivdaten
-  - Automatische Batch-Größenoptimierung
+  - Parallele Verarbeitung von API- und BigQuery-Daten
+  - Intelligente Lastverteilung
+  - Automatische Fehlerbehandlung
   - Fortschrittsverfolgung
-  - Fehlerbehandlung und Wiederaufnahme
 
-### Batch Processor
-- **Datei**: `processing/batch_processor.py`
-- **Funktion**: Effiziente Batch-Verarbeitung von Events
+### BigQuery Integration
+- **Datei**: `bigquery/bigquery_client.py`
+- **Funktion**: Effiziente Abfrage historischer GitHub-Daten
 - **Features**:
-  - Multi-Threading
-  - Optimierte SQLAlchemy-Operationen
-  - Event-Typ-basierte Queues
-  - Automatische Ressourcenanpassung
+  - Optimierte SQL-Queries
+  - Kostenkontrolle
+  - Streaming-Verarbeitung
+  - Automatische Retry-Logik
 
-### Data Enricher
-- **Datei**: `enrichment/data_enricher.py`
-- **Funktion**: Anreicherung von Daten mit GitHub API
+### GitHub API Client
+- **Datei**: `api/github_api.py`
+- **Funktion**: Metadaten-Erfassung und Anreicherung
 - **Features**:
-  - Mehrstufiges Caching (Memory + Disk)
-  - Rate-Limiting-Verwaltung
-  - Batch-Anreicherung
+  - Rate-Limiting-Management
+  - Caching-System
+  - Parallele Anfragen
   - Fehlertoleranz
 
-### Repository Mapper
-- **Datei**: `mapping/repository_mapper.py`
-- **Funktion**: Mapping von Events zu Datenbankmodellen
-- **Features**:
-  - Validierung von Event-Daten
-  - Effiziente Objekterstellung
-  - Caching häufig verwendeter Objekte
-  - Thread-sichere Implementierung
+## 🚀 Schnellstart
 
-### Performance Monitor
-- **Datei**: `monitoring/performance_monitor.py`
-- **Funktion**: Überwachung und Visualisierung der Performance
-- **Features**:
-  - Echtzeit-Metriken
-  - Grafische Dashboards
-  - Ressourcenüberwachung
-  - Metrik-Persistenz
-
-## 🚀 Verwendung
-
-### Installation
+### 1. Installation
 
 ```bash
 # Repository klonen
@@ -113,19 +104,43 @@ venv\Scripts\activate     # Windows
 pip install -r requirements.txt
 ```
 
-### Konfiguration
+### 2. Google Cloud Setup
 
+Folgen Sie der Anleitung in `docs/BIGQUERY_SETUP.md` für:
+- Google Cloud Projekt-Einrichtung
+- Service Account-Erstellung
+- BigQuery API-Aktivierung
+- Credentials-Konfiguration
+
+### 3. Konfiguration
+
+1. Umgebungsvariablen einrichten:
+```bash
+cp .env.template .env
+# .env bearbeiten und Werte einfügen
+```
+
+2. Python-Konfiguration:
 ```python
 from github_database.config import ETLConfig
+from github_database.config.bigquery_config import BigQueryConfig
 
+# BigQuery-Konfiguration
+bigquery_config = BigQueryConfig(
+    project_id="your-project-id",
+    dataset_id="githubarchive",
+    credentials_path="/path/to/credentials.json"
+)
+
+# ETL-Konfiguration
 config = ETLConfig(
     api_token="your_github_token",
     database_url="sqlite:///github_data.db",
-    batch_size=1000
+    bigquery_config=bigquery_config
 )
 ```
 
-### Datenverarbeitung starten
+### 4. Datenverarbeitung starten
 
 ```python
 from github_database.etl_orchestrator import ETLOrchestrator
@@ -139,56 +154,60 @@ start_date = datetime(2024, 1, 1)
 end_date = datetime(2024, 1, 7)
 
 # Verarbeitung starten
-orchestrator.process_archive(start_date, end_date)
+orchestrator.process_repositories(
+    start_date=start_date,
+    end_date=end_date,
+    min_stars=50,  # Qualitätsfilter
+    min_forks=10
+)
 ```
 
-## 📊 Performance-Optimierung
+## 💡 Vorteile des hybriden Ansatzes
 
-Das System enthält mehrere Optimierungen für hohe Performance:
+1. **Effiziente Datenerfassung**:
+   - Historische Daten via BigQuery
+   - Aktuelle Metadaten via GitHub API
+   - Optimale Ressourcennutzung
 
-1. **Batch-Verarbeitung**:
-   - Automatische Batch-Größenanpassung
-   - Effiziente Bulk-Operationen
-   - Event-Typ-basiertes Batching
+2. **Kostenoptimierung**:
+   - Reduzierte API-Aufrufe
+   - Effiziente BigQuery-Nutzung
+   - Intelligentes Caching
 
-2. **Parallelisierung**:
-   - Thread-Pool für gleichzeitige Verarbeitung
-   - Thread-sichere Datenbankzugriffe
-   - Optimierte Worker-Anzahl
+3. **Verbesserte Datenqualität**:
+   - Kreuzvalidierung von Datenquellen
+   - Umfassendere Datensätze
+   - Aktuelle Metadaten
 
-3. **Caching**:
-   - Mehrstufiges Caching-System
-   - LRU-basierte Cache-Eviction
-   - Persistenter Disk-Cache
+4. **Hohe Performance**:
+   - Parallele Verarbeitung
+   - Optimierte Queries
+   - Effizientes Ressourcenmanagement
 
-4. **Datenbankoptimierung**:
-   - Strategische Indizierung
-   - Connection-Pooling
-   - Effiziente Abfragemuster
-
-5. **Speichermanagement**:
-   - Streaming großer Dateien
-   - Automatische Garbage-Collection
-   - Speichereffiziente Datenstrukturen
-
-## 📈 Monitoring
+## 📊 Performance-Monitoring
 
 Das integrierte Monitoring-System bietet:
 
 - Echtzeit-Performance-Metriken
-- Grafische Dashboards
-- CPU- und Speicherüberwachung
-- Durchsatz- und Fehlerstatistiken
+- BigQuery-Kostenüberwachung
+- API-Rate-Limiting-Statistiken
+- Ressourcenauslastung
 
-## 🛠 Tests
+## 🧪 Tests
 
 ```bash
-# Alle Tests ausführen
-python -m pytest tests/
+# Hybrid Pipeline testen
+python -m tests.test_hybrid_pipeline
 
-# Spezifische Test-Suite ausführen
-python -m pytest tests/test_batch_processor.py
+# Testergebnisse analysieren
+python -m tests.analyze_test_results
 ```
+
+## 📚 Weiterführende Dokumentation
+
+- [Systemarchitektur](docs/ARCHITECTURE.md)
+- [BigQuery Setup](docs/BIGQUERY_SETUP.md)
+- [Nutzungsanleitungen](docs/USAGE.md)
 
 ## 📝 Lizenz
 

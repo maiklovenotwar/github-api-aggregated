@@ -1,0 +1,2 @@
+duration_seconds,api_duration_seconds,bigquery_duration_seconds,repositories_processed,total_events,events_by_type,max_memory_mb,error_count
+3.841235876083374,2.3338260650634766,0,0,0,{},0,1

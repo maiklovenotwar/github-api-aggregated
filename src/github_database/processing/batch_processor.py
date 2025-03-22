@@ -11,13 +11,17 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Type, Any, Tuple
 from collections import defaultdict
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert
 
 from ..config import ETLConfig
-from ..database.database import Base, Repository, User, Event, Commit, PullRequest, Issue
+from ..database.database import (
+    Base, Repository, User, Event, Commit, PullRequest, Issue,
+    create_tables, CommitData, PushEventData, PullRequestEventData,
+    IssueEventData, ForkEventData, WatchEventData
+)
 from ..mapping.repository_mapper import RepositoryMapper
 from ..enrichment.data_enricher import DataEnricher
 
@@ -34,8 +38,16 @@ class BatchMetrics:
     db_operations: int = 0
     errors: int = 0
     memory_usage: float = 0.0
+    memory_peak: float = 0.0
     batch_size: int = 0
     processing_time: float = 0.0
+    repositories: int = 0
+    events: int = 0
+
+    @property
+    def duration(self) -> float:
+        """Calculate total duration in seconds."""
+        return time.time() - self.start_time
 
     def calculate_throughput(self) -> float:
         """Calculate events processed per second."""
@@ -48,12 +60,11 @@ class BatchProcessor:
     """Process GitHub events in efficient batches."""
 
     EVENT_ENTITY_MAP = {
-        'PushEvent': Commit,
-        'PullRequestEvent': PullRequest,
-        'IssuesEvent': Issue,
-        'ForkEvent': Repository,
-        'WatchEvent': Repository,
-        'StarEvent': Repository
+        'PushEvent': Event,
+        'PullRequestEvent': Event,
+        'IssuesEvent': Event,
+        'ForkEvent': Event,
+        'WatchEvent': Event
     }
 
     def __init__(self, config: ETLConfig, batch_size: int = 1000):
@@ -74,7 +85,7 @@ class BatchProcessor:
         
         # Initialize database engine with optimized settings
         self.engine = create_engine(
-            config.database_url,
+            config.database.url,
             pool_size=self.max_workers,
             max_overflow=self.max_workers * 2,
             pool_pre_ping=True,
@@ -82,18 +93,18 @@ class BatchProcessor:
         )
         self.Session = sessionmaker(bind=self.engine)
         
-        # Create indexes for commonly queried fields
+        # Create database tables and indexes
+        Base.metadata.create_all(self.engine)
         self._create_indexes()
-
+        
     def _create_indexes(self):
         """Create database indexes for performance optimization."""
         with self.get_session() as session:
-            # Create indexes on commonly queried fields
-            session.execute('CREATE INDEX IF NOT EXISTS idx_repo_id ON repositories (repo_id)')
-            session.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON contributors (user_id)')
-            session.execute('CREATE INDEX IF NOT EXISTS idx_commit_hash ON commits (commit_hash)')
-            session.execute('CREATE INDEX IF NOT EXISTS idx_pr_github_id ON pull_requests (github_id)')
-            session.execute('CREATE INDEX IF NOT EXISTS idx_issue_github_id ON issues (github_id)')
+            session.execute(text('CREATE INDEX IF NOT EXISTS idx_repo_id ON events (repo_id)'))
+            session.execute(text('CREATE INDEX IF NOT EXISTS idx_actor_id ON events (actor_id)'))
+            session.execute(text('CREATE INDEX IF NOT EXISTS idx_sha ON commits (sha)'))
+            session.execute(text('CREATE INDEX IF NOT EXISTS idx_pr_number ON pull_requests (number)'))
+            session.execute(text('CREATE INDEX IF NOT EXISTS idx_issue_number ON issues (number)'))
             session.commit()
 
     def get_session(self) -> Session:
@@ -154,8 +165,12 @@ class BatchProcessor:
 
         # Update metrics
         self.metrics.events_processed += len(events)
+        self.metrics.events = self.metrics.events_processed
+        self.metrics.repositories = len(set(event['repo']['id'] for event in events if 'repo' in event))
         self.metrics.processing_time = time.time() - self.metrics.start_time
-        self.metrics.memory_usage = self._get_memory_usage()
+        current_memory = self._get_memory_usage()
+        self.metrics.memory_usage = current_memory
+        self.metrics.memory_peak = max(self.metrics.memory_peak, current_memory)
 
         # Perform garbage collection after large batches
         if len(events) >= self.batch_size:
@@ -167,8 +182,11 @@ class BatchProcessor:
         try:
             # Map events to database objects
             entity_class = self.EVENT_ENTITY_MAP[event_type]
-            mapper = RepositoryMapper()
+            mapper = RepositoryMapper(session, self.config, DataEnricher(self.config, self.config.cache_dir))
             objects = [mapper.map_event_to_entity(event, entity_class) for event in events]
+            
+            # Filter out None values
+            objects = [obj for obj in objects if obj is not None]
             
             # Bulk insert objects
             self._bulk_insert(session, objects)
@@ -191,27 +209,25 @@ class BatchProcessor:
                     self._process_queue(event_type)
                     
             except queue.Full:
-                logger.warning(f"Queue for {event_type} is full, processing immediately")
+                logger.warning(f"Queue full for {event_type}, processing immediately")
                 self._process_queue(event_type)
                 self.event_queues[event_type].put(event)
 
     def _process_queue(self, event_type: str):
         """Process all events in a queue."""
         events = []
-        queue = self.event_queues[event_type]
+        try:
+            while not self.event_queues[event_type].empty():
+                events.append(self.event_queues[event_type].get_nowait())
+        except queue.Empty:
+            pass
         
-        while not queue.empty() and len(events) < self.batch_size:
-            try:
-                events.append(queue.get_nowait())
-            except queue.Empty:
-                break
-                
         if events:
             self.process_event_batch(events)
 
     def flush_queues(self):
         """Process all remaining events in queues."""
-        for event_type in self.event_queues:
+        for event_type in self.EVENT_ENTITY_MAP:
             self._process_queue(event_type)
 
     def get_metrics(self) -> BatchMetrics:
@@ -232,5 +248,3 @@ class BatchProcessor:
         """Context manager exit with cleanup."""
         self.flush_queues()
         self.executor.shutdown(wait=True)
-        for session in getattr(self.thread_local, 'session', []):
-            session.close()

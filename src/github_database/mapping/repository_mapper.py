@@ -2,12 +2,13 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Type, Any, Union, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from dateutil import parser
+import uuid
 
 from ..config import ETLConfig
 from ..database.database import (
@@ -20,7 +21,13 @@ from ..database.database import (
     Issue,
     Fork,
     Star,
-    Watch
+    Watch,
+    PushEventData,
+    PullRequestEventData,
+    IssueEventData,
+    ForkEventData,
+    WatchEventData,
+    CommitData
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +57,7 @@ class EventValidator:
             EventValidationError: If validation fails
         """
         # Check required fields
-        required_fields = ['id', 'type', 'actor', 'repo', 'created_at']
+        required_fields = ['id', 'type', 'actor_id', 'actor_login', 'created_at']
         missing_fields = [field for field in required_fields if field not in event_dict]
         
         if missing_fields:
@@ -77,11 +84,8 @@ class EventValidator:
             missing_payload_fields = [field for field in required_payload_fields if field not in payload]
             
             if missing_payload_fields:
-                raise EventValidationError(
-                    event_type=event_type,
-                    event_id=event_dict['id'],
-                    reason=f"Missing payload fields: {', '.join(missing_payload_fields)}"
-                )
+                logger.warning(f"Missing payload fields for {event_type}: {', '.join(missing_payload_fields)}")
+                # Don't raise error for missing payload fields as they might be optional
 
 class RepositoryMapper:
     """Map GitHub Archive events to database models."""
@@ -95,37 +99,32 @@ class RepositoryMapper:
         self._user_cache = {}
         self.validator = EventValidator()
         
-    def _extract_repository(self, repo_dict: Dict) -> Repository:
+    def _extract_repository(self, repo_id: str, repo_name: str) -> Repository:
         """
         Extract repository information and get or create Repository object.
         
         Args:
-            repo_dict: Repository dictionary from event
+            repo_id: Repository ID
+            repo_name: Repository name
             
         Returns:
             Repository: SQLAlchemy Repository object
         """
-        # Enrich repository data
-        repo_dict = self.enricher.enrich_repository(repo_dict)
-        repo_id = int(repo_dict['id'])
+        repo_id = int(repo_id)
         
         if repo_id not in self._repo_cache:
             try:
                 repo = self.session.query(Repository).get(repo_id)
                 if not repo:
                     # Parse owner/name from full_name
-                    name_parts = repo_dict['name'].split('/')
+                    name_parts = repo_name.split('/')
                     owner = name_parts[0] if len(name_parts) > 1 else None
                     name = name_parts[-1]
                     
                     repo = Repository(
                         id=repo_id,
                         name=name,
-                        full_name=repo_dict['name'],
-                        description=repo_dict.get('description'),
-                        language=repo_dict.get('language'),
-                        stars_count=repo_dict.get('stars', 0),
-                        forks_count=repo_dict.get('forks', 0),
+                        full_name=repo_name,
                         created_at=datetime.now()
                     )
                     self.session.add(repo)
@@ -136,29 +135,24 @@ class RepositoryMapper:
                 
         return self._repo_cache[repo_id]
         
-    def _extract_user(self, user_dict: Dict) -> User:
+    def _extract_user(self, user_id: int, user_login: str) -> User:
         """
         Extract user information and get or create User object.
         
         Args:
-            user_dict: User dictionary from event
+            user_id: User ID
+            user_login: User login
             
         Returns:
             User: SQLAlchemy User object
         """
-        # Enrich user data
-        user_dict = self.enricher.enrich_user(user_dict)
-        user_id = int(user_dict['id'])
-        
         if user_id not in self._user_cache:
             try:
                 user = self.session.query(User).get(user_id)
                 if not user:
                     user = User(
                         id=user_id,
-                        login=user_dict.get('login'),
-                        name=user_dict.get('name'),
-                        email=user_dict.get('email'),
+                        login=user_login,
                         created_at=datetime.now()
                     )
                     self.session.add(user)
@@ -179,204 +173,170 @@ class RepositoryMapper:
             return None
             
         try:
-            return datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+            if isinstance(timestamp_str, str):
+                return datetime.strptime(timestamp_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+            else:
+                return timestamp_str
         except Exception as e:
             logger.warning(f"Error parsing timestamp {timestamp_str}: {e}")
             return None
 
     def _create_event(self, event: Dict) -> Event:
         """Create Event object from event dictionary."""
-        repo = self._extract_repository(event['repo'])
-        actor = self._extract_user(event['actor'])
+        repo = self._extract_repository(event['id'], event['name'])
+        actor = self._extract_user(event['actor_id'], event['actor_login'])
         
         event_obj = Event(
-            event_id=event['id'],
+            event_id=str(uuid.uuid4()),
             type=event['type'],
             actor_id=actor.id,
             repo_id=repo.id,
-            payload=event['payload'],
+            payload=event.get('payload', {}),
             created_at=self._extract_timestamp(event, 'created_at')
         )
         
         return event_obj
 
-    def map_pushevent(self, event_dict: Dict) -> Tuple[Event, List[Commit]]:
-        """Map PushEvent to Event and Commit objects."""
+    def map_event(self, event: Dict) -> Event:
+        """Map event from BigQuery to Event object."""
         try:
-            event_obj = self._create_event(event_dict)
-            commits = []
-            
-            # Process each commit
-            for commit_data in event_dict['payload'].get('commits', []):
+            # Extract event type and basic fields
+            event_type = event.get('type')
+            if not event_type:
+                logger.warning("Event type missing")
+                return None
+
+            # Parse timestamp
+            created_at_str = event.get('created_at')
+            created_at = None
+            if created_at_str:
                 try:
-                    commit = Commit(
-                        sha=commit_data['sha'],
-                        message=commit_data['message'],
-                        author_name=commit_data['author']['name'],
-                        author_email=commit_data['author']['email'],
-                        timestamp=self._extract_timestamp(commit_data, 'timestamp'),
-                        repository_id=event_obj.repo_id,
-                        user_id=event_obj.actor_id
-                    )
-                    commits.append(commit)
-                except Exception as e:
-                    logger.warning(f"Error processing commit {commit_data.get('sha')}: {str(e)}")
-                    
-            return event_obj, commits
-        except Exception as e:
-            logger.error(f"Error mapping PushEvent: {str(e)}")
-            raise
+                    if isinstance(created_at_str, str):
+                        created_at = datetime.strptime(created_at_str, '%Y-%m-%d %H:%M:%S%z')
+                    else:
+                        created_at = created_at_str
+                except ValueError as e:
+                    logger.warning(f"Error parsing timestamp {created_at_str}: {e}")
 
-    def map_pullrequestevent(self, event_dict: Dict) -> Tuple[Event, PullRequest]:
-        """Map PullRequestEvent to Event and PullRequest objects."""
-        try:
-            event_obj = self._create_event(event_dict)
-            pr_data = event_dict['payload']['pull_request']
-            
-            # Enrich pull request data
-            pr_data = self.enricher.enrich_pull_request(pr_data, event_dict['repo']['name'])
-            
-            # Create pull request object
-            pull_request = PullRequest(
-                id=pr_data['id'],
-                number=pr_data['number'],
-                title=pr_data['title'],
-                body=pr_data['body'],
-                state=pr_data['state'],
-                created_at=self._extract_timestamp(pr_data, 'created_at'),
-                updated_at=self._extract_timestamp(pr_data, 'updated_at'),
-                head_ref=pr_data['head']['ref'],
-                base_ref=pr_data['base']['ref'],
-                additions=pr_data.get('additions', 0),
-                deletions=pr_data.get('deletions', 0),
-                changed_files=pr_data.get('changed_files', 0),
-                repository_id=event_obj.repo_id,
-                user_id=event_obj.actor_id
-            )
-            
-            return event_obj, pull_request
-        except Exception as e:
-            logger.error(f"Error mapping PullRequestEvent: {str(e)}")
-            raise
+            # Initialize payload based on event type
+            payload = {
+                'push': None,
+                'pull_request': None,
+                'issue': None,
+                'forkee': None,
+                'watch': None
+            }
 
-    def map_issuesevent(self, event_dict: Dict) -> Tuple[Event, Issue]:
-        """Map IssuesEvent to Event and Issue objects."""
-        try:
-            event_obj = self._create_event(event_dict)
-            issue_data = event_dict['payload']['issue']
-            
-            # Enrich issue data
-            issue_data = self.enricher.enrich_issue(issue_data, event_dict['repo']['name'])
-            
-            # Create issue object
-            issue = Issue(
-                id=issue_data['id'],
-                number=issue_data['number'],
-                title=issue_data['title'],
-                body=issue_data['body'],
-                state=issue_data['state'],
-                created_at=self._extract_timestamp(issue_data, 'created_at'),
-                updated_at=self._extract_timestamp(issue_data, 'updated_at'),
-                repository_id=event_obj.repo_id,
-                user_id=event_obj.actor_id
-            )
-            
-            return event_obj, issue
-        except Exception as e:
-            logger.error(f"Error mapping IssuesEvent: {str(e)}")
-            raise
+            # Map payload based on event type
+            if event_type == 'PushEvent':
+                payload_data = event.get('payload', {})
+                ref = payload_data.get('ref')
+                commits = payload_data.get('commits', [])
+                
+                if not ref or not commits:
+                    logger.warning("Missing payload fields for PushEvent: commits, ref")
+                
+                payload['push'] = {
+                    'ref': ref,
+                    'commits': [
+                        {
+                            'sha': commit.get('sha'),
+                            'message': commit.get('message'),
+                            'author_name': commit.get('author', {}).get('name'),
+                            'author_email': commit.get('author', {}).get('email')
+                        }
+                        for commit in commits
+                    ] if commits else []
+                }
 
-    def map_forkevent(self, event_dict: Dict) -> Tuple[Event, Fork]:
-        """Map ForkEvent to database models."""
-        try:
-            # Extract common fields
-            repo = self._extract_repository(event_dict['repo'])
-            user = self._extract_user(event_dict['actor'])
-            created_at = self._extract_timestamp(event_dict, 'created_at')
+            elif event_type == 'PullRequestEvent':
+                payload_data = event.get('payload', {})
+                action = payload_data.get('action')
+                pr_data = payload_data.get('pull_request', {})
+                
+                if not action or not pr_data:
+                    logger.warning("Missing payload fields for PullRequestEvent: action, pull_request")
+                
+                payload['pull_request'] = {
+                    'action': action,
+                    'pull_request': {
+                        'number': pr_data.get('number'),
+                        'title': pr_data.get('title'),
+                        'body': pr_data.get('body'),
+                        'state': pr_data.get('state')
+                    }
+                }
+
+            elif event_type == 'IssuesEvent':
+                payload_data = event.get('payload', {})
+                action = payload_data.get('action')
+                issue_data = payload_data.get('issue', {})
+                
+                if not action or not issue_data:
+                    logger.warning("Missing payload fields for IssuesEvent: action, issue")
+                
+                payload['issue'] = {
+                    'action': action,
+                    'issue': {
+                        'number': issue_data.get('number'),
+                        'title': issue_data.get('title'),
+                        'body': issue_data.get('body'),
+                        'state': issue_data.get('state')
+                    }
+                }
+
+            elif event_type == 'ForkEvent':
+                payload_data = event.get('payload', {})
+                forkee_data = payload_data.get('forkee', {})
+                
+                if not forkee_data:
+                    logger.warning("Missing payload fields for ForkEvent: forkee")
+                
+                payload['forkee'] = {
+                    'id': forkee_data.get('id'),
+                    'full_name': forkee_data.get('full_name')
+                }
+
+            elif event_type == 'WatchEvent':
+                payload_data = event.get('payload', {})
+                action = payload_data.get('action')
+                
+                if not action:
+                    logger.warning("Missing payload fields for WatchEvent: action")
+                
+                payload['watch'] = {
+                    'action': action
+                }
+
+            # Create Event object with repository ID from event data
+            repo = self._extract_repository(str(event['id']), event['name'])
+            actor = self._extract_user(event['actor_id'], event['actor_login'])
             
-            # Extract fork details
-            forkee = event_dict['payload']['forkee']
-            forked_repo = self._extract_repository(forkee)
+            # Generate a unique event ID
+            event_id = str(uuid.uuid4())
             
-            # Create event
-            event = Event(
-                event_id=event_dict['id'],
-                type=event_dict['type'],
-                actor_id=user.id,
+            return Event(
+                event_id=event_id,
+                type=event_type,
+                actor_id=actor.id,
                 repo_id=repo.id,
-                payload=event_dict['payload'],
-                created_at=created_at
+                created_at=created_at,
+                public=True,
+                payload=payload
             )
-            
-            # Create fork
-            fork = Fork(
-                repository_id=forked_repo.id,  # ID of the forked repository
-                parent_id=repo.id,  # ID of the source repository
-                user_id=user.id,
-                forked_at=created_at
-            )
-            
-            return event, fork
+
         except Exception as e:
-            logger.error(f"Error mapping ForkEvent: {e}")
+            logger.error(f"Error mapping event: {e}")
             raise
 
-    def map_starevent(self, event_dict: Dict) -> Tuple[Event, Star]:
-        """Map StarEvent to database models."""
+    def map_event_to_entity(self, event: Dict, entity_class: Type) -> Any:
+        """Map event data to specified entity class."""
         try:
-            # Extract common fields
-            repo = self._extract_repository(event_dict['repo'])
-            user = self._extract_user(event_dict['actor'])
-            created_at = self._extract_timestamp(event_dict, 'created_at')
-            
-            # Create event
-            event = Event(
-                event_id=event_dict['id'],
-                type=event_dict['type'],
-                actor_id=user.id,
-                repo_id=repo.id,
-                payload=event_dict['payload'],
-                created_at=created_at
-            )
-            
-            # Create star
-            star = Star(
-                repository_id=repo.id,
-                user_id=user.id,
-                starred_at=created_at
-            )
-            
-            return event, star
+            if entity_class == Event:
+                return self.map_event(event)
+            else:
+                logger.error(f"Unsupported entity class: {entity_class}")
+                return None
         except Exception as e:
-            logger.error(f"Error mapping StarEvent: {e}")
-            raise
-
-    def map_watchevent(self, event_dict: Dict) -> Tuple[Event, Watch]:
-        """Map WatchEvent to database models."""
-        try:
-            # Extract common fields
-            repo = self._extract_repository(event_dict['repo'])
-            user = self._extract_user(event_dict['actor'])
-            created_at = self._extract_timestamp(event_dict, 'created_at')
-            
-            # Create event
-            event = Event(
-                event_id=event_dict['id'],
-                type=event_dict['type'],
-                actor_id=user.id,
-                repo_id=repo.id,
-                payload=event_dict['payload'],
-                created_at=created_at
-            )
-            
-            # Create watch
-            watch = Watch(
-                repository_id=repo.id,
-                user_id=user.id,
-                watched_at=created_at
-            )
-            
-            return event, watch
-        except Exception as e:
-            logger.error(f"Error mapping WatchEvent: {e}")
-            raise
+            logger.error(f"Error mapping event to entity: {e}")
+            return None

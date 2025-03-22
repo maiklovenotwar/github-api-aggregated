@@ -16,10 +16,21 @@ class QualityThresholds:
 @dataclass
 class APIConfig:
     """GitHub API configuration."""
-    token: str
+    token: str = ""
     requests_per_hour: int = 5000
     min_remaining_rate: int = 100
     retry_wait_time: int = 60
+
+@dataclass
+class BigQueryConfig:
+    """BigQuery configuration for GitHub Archive data."""
+    project_id: str = ""
+    dataset_id: str = "githubarchive"
+    table_prefix: str = "github_timeline"
+    credentials_path: Optional[Path] = None
+    max_bytes_billed: int = 20_000_000_000  # 20GB
+    batch_size: int = 1000
+    max_query_days: int = 30  # Maximum days to query in a single batch
 
 @dataclass
 class ArchiveConfig:
@@ -40,28 +51,66 @@ class DatabaseConfig:
 @dataclass
 class ProcessingState:
     """Track processing progress for resume capability."""
-    last_processed_date: datetime
+    last_processed_date: datetime = field(default_factory=lambda: datetime.now())
     last_processed_hour: int = 0
     processed_repo_ids: Set[int] = field(default_factory=set)
     failed_repo_ids: Set[int] = field(default_factory=set)
     event_counts: Dict[str, int] = field(default_factory=dict)
 
-@dataclass
 class ETLConfig:
     """Master configuration for ETL process."""
-    quality: QualityThresholds
-    api: APIConfig
-    archive: ArchiveConfig
-    database: DatabaseConfig
-    start_date: datetime
-    end_date: datetime
-    state_file: Path = Path("etl_state.json")
+    
+    def __init__(self, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None):
+        """
+        Initialize with default values.
+        
+        Args:
+            start_date: Optional start date for data collection
+            end_date: Optional end date for data collection
+        """
+        self.start_date = start_date
+        self.end_date = end_date
+        
+        self.quality = QualityThresholds()
+        self.api = APIConfig()
+        self.bigquery = BigQueryConfig()
+        self.archive = ArchiveConfig()
+        self.database = DatabaseConfig()
+        self.state = ProcessingState()
+        
+        # General settings
+        self.cache_dir = Path("cache")
+        self.batch_size = 1000
+        self.max_retries = 3
+        self.state_file = Path("etl_state.json")
+        self.max_repositories = None  # Maximum number of repositories to process
     
     @classmethod
-    def from_env(cls, env_file: Path = Path(".env")):
-        """Create configuration from environment variables."""
-        # Implementation for loading from .env file
-        pass
+    def from_env(cls, env_file: Path = Path(".env"), start_date: Optional[datetime] = None, end_date: Optional[datetime] = None):
+        """
+        Create configuration from environment variables.
+        
+        Args:
+            env_file: Path to .env file
+            start_date: Optional start date for data collection
+            end_date: Optional end date for data collection
+            
+        Returns:
+            ETLConfig: Configuration initialized from environment
+        """
+        import os
+        from dotenv import load_dotenv
+        
+        load_dotenv(env_file)
+        
+        config = cls(start_date=start_date, end_date=end_date)
+        config.api.token = os.getenv('GITHUB_API_TOKEN', '')
+        config.bigquery.project_id = os.getenv('BIGQUERY_PROJECT_ID', '')
+        config.bigquery.credentials_path = Path(os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')) if os.getenv('GOOGLE_APPLICATION_CREDENTIALS') else None
+        config.bigquery.max_bytes_billed = int(os.getenv('BIGQUERY_MAX_BYTES', 20_000_000_000))
+        config.database.url = os.getenv('DATABASE_URL', 'sqlite:///github_data.db')
+        
+        return config
     
     def save_state(self, state: ProcessingState) -> None:
         """Save current processing state to file."""
