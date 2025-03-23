@@ -1,166 +1,180 @@
-"""ETL orchestration for GitHub data processing."""
+"""ETL orchestrator for GitHub data."""
 
 import logging
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Optional, Generator, Dict, Any, List
-import gc
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional
+
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from .config import ETLConfig
-from .config.bigquery_config import BigQueryConfig
-from .database.database import (
-    create_tables,
-    get_session,
-    create_repository_from_api,
-    Repository
-)
-from .bigquery.bigquery_client import BigQueryClient
-from .bigquery.event_parser import EventParser
-from .processing.batch_processor import BatchProcessor
-from .control_database.validate_data import DataValidator
-from .enrichment.data_enricher import DataEnricher
+from .api.github_api import GitHubAPIClient, GitHubAPIError, RateLimitError
+from .api.bigquery_api import BigQueryClient
+from .database.database import User, Organization, Repository, Event
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ETLOrchestrator:
-    """Orchestrate the ETL process for GitHub data using both API and BigQuery."""
+    """ETL orchestrator for GitHub data."""
     
-    def __init__(self, config: ETLConfig, bigquery_config: Optional[BigQueryConfig] = None):
-        """
-        Initialize ETL orchestrator.
-        
-        Args:
-            config: ETL configuration
-            bigquery_config: Optional BigQuery configuration
-        """
+    def __init__(self, config: ETLConfig):
+        """Initialize orchestrator."""
         self.config = config
-        self.bigquery_config = bigquery_config or BigQueryConfig.from_env()
-        self.bigquery_config.max_bytes_billed = 20_000_000_000  # 20GB
+        self.github_client = GitHubAPIClient(config.github)
+        self.bigquery_client = BigQueryClient(config.bigquery)
         
-        # Initialize components
-        self.bigquery_client = BigQueryClient(self.bigquery_config)
-        self.event_parser = EventParser()
+    def _handle_api_error(self, error: Exception, context: str) -> None:
+        """Handle API errors."""
+        if isinstance(error, RateLimitError):
+            wait_time = error.reset_time - datetime.now(timezone.utc).timestamp()
+            logger.warning(f"Rate limit exceeded in {context}. Waiting {wait_time:.0f}s...")
+            raise error
+            
+        if isinstance(error, GitHubAPIError):
+            if error.status_code == 404:
+                logger.warning(f"Not found in {context}: {error}")
+                return
+            logger.error(f"API error in {context}: {error}")
+            raise error
+            
+        logger.error(f"Unexpected error in {context}: {error}")
+        raise error
         
-        self.batch_processor = BatchProcessor(
-            config=config,
-            batch_size=config.batch_size
-        )
-        
-        self.data_validator = DataValidator()
-        self.data_enricher = DataEnricher(config, config.cache_dir)
-        
-        # Ensure database tables exist
-        create_tables()
-        
-    def process_repositories(
-        self,
-        repositories: List[Dict],
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
-    ):
-        """
-        Process GitHub data for repositories.
-        
-        Args:
-            repositories: List of repository data from GitHub API
-            start_date: Optional start date (inclusive)
-            end_date: Optional end date (inclusive)
-        """
+    def _get_or_create_user(self, user_data: Dict[str, Any], session: Session) -> Optional[User]:
+        """Get or create a user."""
         try:
-            # Step 1: Store repositories in database
-            session = get_session()
-            repository_ids = []
-            
-            for repo_data in repositories:
-                try:
-                    # Check if repository already exists
-                    repo = session.query(Repository).filter_by(id=repo_data['id']).first()
-                    if not repo:
-                        repo = create_repository_from_api(repo_data)
-                        session.add(repo)
-                    repository_ids.append(repo.id)
-                except Exception as e:
-                    logger.error(f"Error processing repository {repo_data.get('id')}: {e}")
-                    
-            session.commit()
-            
-            # Step 2: Process events from BigQuery if dates provided
-            if start_date and end_date:
-                self._process_historical_events(
-                    repository_ids,
-                    start_date,
-                    end_date
+            user = session.query(User).filter_by(id=user_data['id']).first()
+            if not user:
+                user_details = self.github_client.get_user(user_data['login'])
+                user = User(
+                    id=user_details['id'],
+                    login=user_details['login'],
+                    name=user_details.get('name'),
+                    email=user_details.get('email'),
+                    location=user_details.get('location'),
+                    company=user_details.get('company'),
+                    bio=user_details.get('bio'),
+                    blog=user_details.get('blog'),
+                    twitter_username=user_details.get('twitter_username'),
+                    public_repos=user_details.get('public_repos', 0),
+                    public_gists=user_details.get('public_gists', 0),
+                    followers=user_details.get('followers', 0),
+                    following=user_details.get('following', 0),
+                    created_at=datetime.strptime(user_details['created_at'], '%Y-%m-%dT%H:%M:%SZ'),
+                    updated_at=datetime.strptime(user_details['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
                 )
-            
-        finally:
-            # Ensure all remaining events are processed
-            self.batch_processor.flush_queues()
-            session.close()
-            
-    def _process_historical_events(
-        self,
-        repository_ids: List[int],
-        start_date: datetime,
-        end_date: datetime
-    ):
-        """
-        Process historical events for repositories.
-        
-        Args:
-            repository_ids: List of repository IDs to process
-            start_date: Start date for event collection
-            end_date: End date for event collection
-        """
-        # Process events in batches to manage memory
-        for repository_batch in self._batch_repositories(repository_ids):
-            events = self.bigquery_client.get_events(
-                start_date=start_date,
-                end_date=end_date,
-                repository_ids=repository_batch
-            )
-            
-            for event in events:
-                self.batch_processor.add_event(event)
-                    
-            # Force garbage collection after each batch
-            gc.collect()
-            
-    def _batch_repositories(self, repository_ids: List[int]) -> Generator[List[int], None, None]:
-        """Generate batches of repository IDs."""
-        batch = []
-        for repository_id in repository_ids:
-            batch.append(repository_id)
-            if len(batch) >= self.config.batch_size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
-
-    def get_metrics(self):
-        """Get pipeline metrics."""
-        return self.batch_processor.get_metrics()
-
-    def run_pipeline(self):
-        """Run the ETL pipeline."""
-        try:
-            # Get repositories from GitHub API
-            from .api.github_api import get_repositories_since
-            
-            repositories = get_repositories_since(
-                since_date=self.config.start_date,
-                min_stars=self.config.quality.min_stars,
-                max_repos=self.config.max_repositories
-            )
-            
-            # Process repositories
-            self.process_repositories(
-                repositories,
-                start_date=self.config.start_date,
-                end_date=self.config.end_date
-            )
-            
+                session.add(user)
+                session.commit()
+            return user
         except Exception as e:
-            logger.error(f"Pipeline error: {e}")
+            logger.error(f"Error creating user {user_data['login']}: {e}")
+            session.rollback()
+            return None
+            
+    def _get_or_create_organization(self, org_data: Dict[str, Any], session: Session) -> Optional[Organization]:
+        """Get or create an organization."""
+        try:
+            org = session.query(Organization).filter_by(id=org_data['id']).first()
+            if not org:
+                org_details = self.github_client.get_organization(org_data['login'])
+                org = Organization(
+                    id=org_details['id'],
+                    login=org_details['login'],
+                    name=org_details.get('name'),
+                    bio=org_details.get('description'),  
+                    blog=org_details.get('blog'),
+                    location=org_details.get('location'),
+                    email=org_details.get('email'),
+                    twitter_username=org_details.get('twitter_username'),
+                    public_repos=org_details.get('public_repos', 0),
+                    public_gists=org_details.get('public_gists', 0),
+                    followers=org_details.get('followers', 0),
+                    following=org_details.get('following', 0),
+                    created_at=datetime.strptime(org_details['created_at'], '%Y-%m-%dT%H:%M:%SZ'),
+                    updated_at=datetime.strptime(org_details['updated_at'], '%Y-%m-%dT%H:%M:%SZ')
+                )
+                session.add(org)
+                session.commit()
+            return org
+        except Exception as e:
+            logger.error(f"Error creating organization {org_data['login']}: {e}")
+            session.rollback()
+            return None
+            
+    def process_repository(self, full_name: str, session: Session) -> Optional[Repository]:
+        """Process a repository."""
+        try:
+            repo = session.query(Repository).filter_by(full_name=full_name).first()
+            if not repo:
+                # Split the full_name into owner and name
+                owner, name = full_name.split('/')
+                repo_data = self.github_client.get_repository(owner, name)
+                owner_obj = None
+                organization_id = None
+                
+                if repo_data['owner']['type'] == 'Organization':
+                    owner_obj = self._get_or_create_organization(repo_data['owner'], session)
+                    if owner_obj:
+                        organization_id = owner_obj.id
+                else:
+                    owner_obj = self._get_or_create_user(repo_data['owner'], session)
+                    
+                if owner_obj:
+                    repo = Repository(
+                        id=repo_data['id'],
+                        name=repo_data['name'],
+                        full_name=repo_data['full_name'],
+                        owner_id=owner_obj.id,
+                        organization_id=organization_id,  # Setze organization_id, wenn der Besitzer eine Organisation ist
+                        description=repo_data.get('description'),
+                        homepage=repo_data.get('homepage'),
+                        language=repo_data.get('language'),
+                        private=repo_data.get('private', False),
+                        fork=repo_data.get('fork', False),
+                        default_branch=repo_data.get('default_branch'),
+                        size=repo_data.get('size', 0),
+                        stargazers_count=repo_data.get('stargazers_count', 0),  # Setze stargazers_count aus der API
+                        watchers_count=repo_data.get('watchers_count', 0),      # Setze watchers_count aus der API
+                        forks_count=repo_data.get('forks_count', 0),            # Setze forks_count aus der API
+                        open_issues_count=repo_data.get('open_issues_count', 0), # Setze open_issues_count aus der API
+                        created_at=datetime.strptime(repo_data['created_at'], '%Y-%m-%dT%H:%M:%SZ'),
+                        updated_at=datetime.strptime(repo_data['updated_at'], '%Y-%m-%dT%H:%M:%SZ'),
+                        pushed_at=datetime.strptime(repo_data['pushed_at'], '%Y-%m-%dT%H:%M:%SZ') if repo_data.get('pushed_at') else None
+                    )
+                    session.add(repo)
+                    session.commit()
+            return repo
+        except Exception as e:
+            logger.error(f"Error processing repository {full_name}: {e}")
+            session.rollback()
+            return None
+            
+    def _process_event(self, event_data: Dict[str, Any], session: Session) -> None:
+        """Process a single event."""
+        try:
+            event = Event(
+                id=event_data['id'],
+                type=event_data['type'],
+                actor_id=event_data['actor']['id'],
+                repo_id=event_data['repo']['id'],
+                created_at=datetime.strptime(event_data['created_at'], '%Y-%m-%dT%H:%M:%SZ')
+            )
+            session.add(event)
+        except Exception as e:
+            logger.error(f"Error processing event {event_data['id']}: {e}")
+            raise e
+            
+    def update_yearly_data(self, year: int, session: Session) -> None:
+        """Update data for a specific year."""
+        try:
+            events = self.bigquery_client.get_events(year)
+            for event_data in events:
+                self._process_event(event_data, session)
+            session.commit()
+        except SQLAlchemyError as e:
+            logger.error(f"Error in updating data for year {year}: {e}")
+            session.rollback()
+            raise
+        except Exception as e:
+            logger.error(f"Error in updating data for year {year}: {e}")
             raise

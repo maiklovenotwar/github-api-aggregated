@@ -1,175 +1,175 @@
+"""Main entry point for GitHub data collection."""
+
+import logging
 import os
 import time
-from datetime import datetime, timedelta
-import requests
-from typing import Optional, Dict, List, Tuple
-from sqlalchemy import inspect
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
-# dotenv for environment variables
-from dotenv import load_dotenv
-
-# Own modules from github_database package
-from .api.github_api import get_repositories_since
-from .database.database import (
-    init_db,
-    get_session,
-    create_repository_from_api,
-    Repository
-)
-from .config.bigquery_config import BigQueryConfig
+from .config import ETLConfig, GitHubConfig, BigQueryConfig
+from .database.database import init_db
 from .etl_orchestrator import ETLOrchestrator
 
-# Load environment variables
-load_dotenv()
-GITHUB_TOKEN = os.getenv('GITHUB_API_TOKEN')
-headers = {
-    'Authorization': f'token {GITHUB_TOKEN}',
-    'Accept': 'application/vnd.github.v3+json'
-}
-
-class RateLimitManager:
-    def __init__(self, threshold: int = 5):  # Lower threshold for Core API
-        self.threshold = threshold
-        self.remaining = None
-        self.reset_time = None
-        self._last_check = None
-        self._check_interval = timedelta(minutes=1)  # Check every 1 minute
-        
-    def should_check_rate_limit(self) -> bool:
-        """Determine if rate limit should be checked"""
-        if self._last_check is None:
-            return True
-        if self.remaining is not None and self.remaining < self.threshold:
-            return True
-        return datetime.now() - self._last_check > self._check_interval
-        
-    def check_rate_limit(self) -> None:
-        """Check Core API rate limit only when necessary"""
-        if not self.should_check_rate_limit():
-            return
-            
-        url = "https://api.github.com/rate_limit"
-        response = requests.get(url, headers=headers)
-        self._last_check = datetime.now()
-        
-        if response.status_code == 200:
-            data = response.json()
-            core = data.get("resources", {}).get("core", {})
-            self.remaining = core.get("remaining", 0)
-            reset = core.get("reset", 0)
-            self.reset_time = datetime.fromtimestamp(reset)
-            limit = core.get("limit", 5000)
-            
-            print(f"Core-API Rate-Limit: {self.remaining}/{limit} remaining (Reset: {self.reset_time})")
-            
-            if self.remaining < self.threshold:
-                sleep_seconds = (self.reset_time - datetime.now()).total_seconds() + 5
-                if sleep_seconds > 0:
-                    print(f"Core-API Rate-Limit low. Waiting {int(sleep_seconds)} seconds...")
-                    time.sleep(sleep_seconds)
-        else:
-            print(f"Error fetching rate limit: HTTP {response.status_code}")
-
-def process_repositories(repositories: List[Dict], session) -> Tuple[int, int]:
-    """
-    Process a list of repositories and save them to the database.
-    Uses SQLAlchemy bulk operations for better performance.
-    
-    Returns:
-        Tuple of (number of new repos, number of updated repos)
-    """
-    # Get all columns of the Repository model
-    columns = [c.key for c in inspect(Repository).mapper.column_attrs]
-    
-    # Collect new and to-be-updated repositories
-    new_repos_dicts = []
-    update_dicts = []
-    existing_repo_ids = set(id_tuple[0] for id_tuple in 
-                          session.query(Repository.repo_id)
-                          .filter(Repository.repo_id.in_([r['id'] for r in repositories]))
-                          .all())
-    
-    for repo_data in repositories:
-        try:
-            # Create Repository object
-            repo_obj = create_repository_from_api(repo_data)
-            
-            # Convert to dictionary for bulk operations
-            repo_dict = {attr: getattr(repo_obj, attr) for attr in columns}
-            
-            if repo_obj.repo_id in existing_repo_ids:
-                update_dicts.append(repo_dict)
-            else:
-                new_repos_dicts.append(repo_dict)
-                
-        except Exception as e:
-            print(f"Error processing repository {repo_data.get('full_name')}: {e}")
-            continue
-            
-    # Bulk insert new repositories
-    if new_repos_dicts:
-        session.bulk_insert_mappings(Repository, new_repos_dicts)
-        
-    # Bulk update existing repositories
-    if update_dicts:
-        session.bulk_update_mappings(Repository, update_dicts)
-        
-    session.commit()
-    
-    return len(new_repos_dicts), len(update_dicts)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def main():
-    """Main entry point for GitHub data collection."""
-    # Initialize database
-    init_db()
-    
-    # Initialize rate limit manager
-    rate_limit = RateLimitManager()
-    
-    # Create configurations
-    bigquery_config = BigQueryConfig.from_env()
-    
-    # Initialize ETL orchestrator
-    orchestrator = ETLOrchestrator(
-        config={
-            'min_stars': 50,
-            'min_forks': 10,
-            'min_commits': 100,
-            'batch_size': 1000,
-            'cache_dir': 'cache'
-        },
-        bigquery_config=bigquery_config
-    )
-    
-    # Process repositories and events
+    """Main entry point."""
     try:
-        # Get repositories from GitHub API
-        session = get_session()
-        
-        # Get repositories updated in the last week
-        since = datetime.now() - timedelta(days=7)
-        repositories = get_repositories_since(since, headers)
-        
-        # Process repositories
-        new_count, updated_count = process_repositories(repositories, session)
-        print(f"Processed {new_count} new and {updated_count} updated repositories")
-        
-        # Get historical data from BigQuery
-        start_date = datetime(2014, 1, 1)  # GitHub Archive data starts from 2014
-        end_date = datetime.now()
-        
-        # Process historical events for repositories
-        orchestrator.process_repositories(
-            start_date=start_date,
-            end_date=end_date
+        # Initialize configuration
+        config = ETLConfig(
+            database_url=os.getenv("DATABASE_URL", "sqlite:///github.db"),
+            github=GitHubConfig(access_token=os.getenv("GITHUB_API_TOKEN", "")),
+            bigquery=BigQueryConfig(
+                project_id=os.getenv("BIGQUERY_PROJECT_ID", "github-api-archive"),
+                dataset_id="githubarchive",
+                table_id="day",
+                credentials_path=Path(os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")),
+                max_bytes_billed=int(os.getenv("BIGQUERY_MAX_BYTES", "1000000000"))
+            )
         )
         
-    except Exception as e:
-        print(f"Error in main process: {e}")
-        raise
+        # Initialize database
+        logger.info("Initializing database...")
+        try:
+            # Initialisiere Datenbank und erhalte Session-Factory
+            Session = init_db(config.database_url)
+            # Erstelle Session
+            session = Session()
+            logger.info("Database initialized and session created successfully")
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+            return
         
-    finally:
-        session.close()
+        # Create ETL orchestrator
+        try:
+            orchestrator = ETLOrchestrator(config)
+        except Exception as e:
+            logger.error(f"Error creating ETL orchestrator: {e}")
+            return
+        
+        # Get repositories with at least 10 stars using GitHub API
+        logger.info("Getting repositories with at least 10 stars...")
+        try:
+            # Verwende die GitHub API anstelle von BigQuery, um Repositories mit historischen Stars zu finden
+            total_repos = 50  # Reduziert von 500 auf 50 für schnellere Testausführung
+            batch_size = 100    # Größe jedes Batches
+            all_repositories = []
+            
+            logger.info(f"Fetching {total_repos} repositories with at least 10 stars in batches of {batch_size}...")
+            
+            for i in range(0, total_repos, batch_size):
+                logger.info(f"Fetching batch {i//batch_size + 1} of {(total_repos + batch_size - 1)//batch_size}...")
+                batch_repositories = orchestrator.github_client.search_repositories(
+                    min_stars=10,  # Gemäß den Quality Thresholds
+                    limit=batch_size
+                )
+                
+                if not batch_repositories:
+                    logger.warning(f"No more repositories found after {len(all_repositories)} repositories.")
+                    break
+                
+                all_repositories.extend(batch_repositories)
+                logger.info(f"Fetched {len(all_repositories)} repositories so far.")
+                
+                # Wenn wir genug Repositories haben, brechen wir ab
+                if len(all_repositories) >= total_repos:
+                    all_repositories = all_repositories[:total_repos]
+                    break
+                
+                # Kurze Pause, um API-Limits zu respektieren
+                time.sleep(1)
+            
+            repositories = all_repositories
+            logger.info(f"Found a total of {len(repositories)} repositories with at least 10 stars")
+            
+            if not repositories:
+                logger.warning("No repositories found. Using fallback repositories.")
+                # Fallback: Verwende einige bekannte populäre Repositories
+                repositories = [
+                    {"full_name": "microsoft/vscode", "stars": 100, "contributors": 0, "commits": 0},
+                    {"full_name": "facebook/react", "stars": 100, "contributors": 0, "commits": 0},
+                    {"full_name": "tensorflow/tensorflow", "stars": 100, "contributors": 0, "commits": 0},
+                    {"full_name": "kubernetes/kubernetes", "stars": 100, "contributors": 0, "commits": 0},
+                    {"full_name": "flutter/flutter", "stars": 100, "contributors": 0, "commits": 0}
+                ]
+                
+        except Exception as e:
+            logger.error(f"Error getting repositories: {e}")
+            # Fallback: Verwende einige bekannte populäre Repositories
+            repositories = [
+                {"full_name": "microsoft/vscode", "stars": 100, "contributors": 0, "commits": 0},
+                {"full_name": "facebook/react", "stars": 100, "contributors": 0, "commits": 0},
+                {"full_name": "tensorflow/tensorflow", "stars": 100, "contributors": 0, "commits": 0},
+                {"full_name": "kubernetes/kubernetes", "stars": 100, "contributors": 0, "commits": 0},
+                {"full_name": "flutter/flutter", "stars": 100, "contributors": 0, "commits": 0}
+            ]
+        
+        # Process each repository
+        for repo_data in repositories:
+            try:
+                logger.info(f"Processing repository {repo_data['full_name']}...")
+                try:
+                    repo = orchestrator.process_repository(repo_data['full_name'], session)
+                except Exception as e:
+                    logger.error(f"Error processing repository {repo_data['full_name']}: {e}")
+                    continue
+                
+                if repo:
+                    # Update metrics from BigQuery
+                    try:
+                        metrics = orchestrator.bigquery_client.get_repository_metrics(
+                            full_name=repo_data['full_name'],
+                            since=datetime.now(timezone.utc) - timedelta(days=365)
+                        )
+                    except Exception as e:
+                        logger.error(f"Error getting repository metrics for {repo_data['full_name']}: {e}")
+                        metrics = {'stars': repo_data.get('stars', 0), 'contributors': 0, 'commits': 0}
+                    
+                    repo.stars = metrics['stars']
+                    repo.contributors = metrics['contributors']
+                    repo.commits = metrics['commits']
+                    
+                    # Get events
+                    try:
+                        events = orchestrator.bigquery_client.get_repository_events(
+                            full_name=repo_data['full_name'],
+                            since=datetime.now(timezone.utc) - timedelta(days=365),
+                            batch_size=1000  # Aus den Quality Thresholds
+                        )
+                    except Exception as e:
+                        logger.error(f"Error getting repository events for {repo_data['full_name']}: {e}")
+                        events = []
+                    
+                    logger.info(f"Found {len(events)} events for {repo_data['full_name']}")
+                    
+                    # Process events in batches
+                    for event_data in events:
+                        try:
+                            orchestrator._process_event(event_data, session)
+                        except Exception as e:
+                            logger.error(f"Error processing event: {e}")
+                            continue
+                    
+                    try:
+                        session.commit()
+                    except Exception as e:
+                        logger.error(f"Error committing session: {e}")
+                        session.rollback()
+                        continue
+                    
+                    logger.info(f"Successfully processed {repo_data['full_name']}")
+                    
+            except Exception as e:
+                logger.error(f"Error processing repository {repo_data['full_name']}: {e}")
+                continue
+    
+    except Exception as e:
+        logger.error(f"Error running main script: {e}")
 
 if __name__ == "__main__":
     main()

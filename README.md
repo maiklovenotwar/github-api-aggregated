@@ -19,42 +19,46 @@ github-api/
 ├── src/
 │   └── github_database/
 │       ├── api/                    # GitHub API Integration
-│       │   └── github_api.py       # API-Client und Rate-Limiting
+│       │   ├── github_api.py       # API-Client und Rate-Limiting
+│       │   └── bigquery_api.py     # BigQuery-Client für GitHub Archive
 │       │
-│       ├── bigquery/              # BigQuery Integration
-│       │   ├── bigquery_client.py # BigQuery-Client für GitHub Archive
-│       │   ├── event_parser.py    # Event-Parsing von BigQuery-Daten
-│       │   └── query_builder.py   # SQL-Query-Generator
+│       ├── analysis/               # Datenanalyse-Komponenten
+│       │   ├── location_analysis.py # Standortbasierte Analyse
+│       │   └── organization_analysis.py # Organisationsanalyse
 │       │
-│       ├── database/              # Datenbankmodelle und Verwaltung
-│       │   ├── database.py        # SQLAlchemy-Modelle
-│       │   └── migrations/        # Alembic Migrationsskripte
+│       ├── control_database/       # Datenbankvalidierung und -kontrolle
+│       │   └── validate_data.py    # Datenvalidierungsfunktionen
 │       │
-│       ├── enrichment/            # Datenanreicherung
-│       │   └── data_enricher.py   # Anreicherung mit API-Daten
+│       ├── database/               # Datenbankmodelle und Verwaltung
+│       │   ├── database.py         # SQLAlchemy-Modelle
+│       │   └── migrations/         # Alembic Migrationsskripte
 │       │
-│       ├── config/               # Konfiguration
-│       │   ├── config.py         # Hauptkonfiguration
-│       │   └── bigquery_config.py # BigQuery-spezifische Konfiguration
+│       ├── enrichment/             # Datenanreicherung
+│       │   └── data_enricher.py    # Anreicherung mit API-Daten
 │       │
-│       ├── monitoring/           # Performance-Überwachung
+│       ├── config/                 # Konfiguration
+│       │   ├── config.py           # Hauptkonfiguration
+│       │   └── bigquery_config.py  # BigQuery-spezifische Konfiguration
+│       │
+│       ├── monitoring/             # Performance-Überwachung
 │       │   └── performance_monitor.py # Metriken und Visualisierung
 │       │
-│       ├── etl_orchestrator.py  # Hybride ETL-Prozesssteuerung
-│       └── main.py             # Hauptanwendung
+│       ├── github_archive.py       # GitHub Archive Event-Typen
+│       ├── etl_orchestrator.py     # Hybride ETL-Prozesssteuerung
+│       └── main.py                 # Hauptanwendung
 │
-├── docs/                       # Dokumentation
-│   ├── ARCHITECTURE.md        # Systemarchitektur
-│   ├── BIGQUERY_SETUP.md      # BigQuery-Einrichtung
-│   └── USAGE.md              # Nutzungsanleitungen
+├── docs/                           # Dokumentation
+│   ├── ARCHITECTURE.md             # Systemarchitektur
+│   ├── BIGQUERY_SETUP.md           # BigQuery-Einrichtung
+│   └── USAGE.md                    # Nutzungsanleitungen
 │
-├── tests/                     # Testsuite
-│   ├── test_hybrid_pipeline.py # Tests für hybride Pipeline
-│   └── analyze_test_results.py # Testanalyse und Visualisierung
+├── tests/                          # Testsuite
+│   ├── test_hybrid_pipeline.py     # Tests für hybride Pipeline
+│   └── analyze_test_results.py     # Testanalyse und Visualisierung
 │
-├── .env.template             # Umgebungsvariablen-Template
-├── requirements.txt          # Python-Abhängigkeiten
-└── README.md                # Projektdokumentation
+├── .env.template                  # Umgebungsvariablen-Template
+├── requirements.txt               # Python-Abhängigkeiten
+└── README.md                      # Projektdokumentation
 ```
 
 ## 🔑 Hauptkomponenten
@@ -192,6 +196,38 @@ Das integrierte Monitoring-System bietet:
 - BigQuery-Kostenüberwachung
 - API-Rate-Limiting-Statistiken
 - Ressourcenauslastung
+
+## 📋 Status der Module
+
+### Aktiv verwendete Kernmodule
+- **main.py**: Haupteinstiegspunkt der Anwendung
+- **etl_orchestrator.py**: Kernkomponente für die ETL-Prozesse
+- **api/github_api.py** und **api/bigquery_api.py**: API-Clients für GitHub und BigQuery
+- **database/database.py**: Datenbankmodelle und Initialisierung
+- **config/**: Konfigurationsmodule für die Anwendung
+
+### Module für zukünftige Erweiterungen
+Folgende Module sind für zukünftige Funktionalitäten vorgesehen und werden derzeit nicht aktiv in der Hauptanwendung verwendet:
+
+1. **Analyse-Module** (`analysis/`):
+   - `location_analysis.py`: Standortbasierte Analyse von Repositories und Nutzern
+   - `organization_analysis.py`: Analyse von Organisationsaktivitäten
+   - `visualization.py`: Visualisierungskomponenten für Analyseergebnisse
+
+2. **Datenbank-Kontrollmodule** (`control_database/`):
+   - `cleanup_duplicates.py`: Bereinigung von Duplikaten in der Datenbank
+   - `control_data.py`: Kontrollfunktionen für Datenbankoperationen
+   - `validate_data.py`: Validierung von Daten vor dem Import
+
+3. **Datenanreicherung und Mapping** (`enrichment/`, `mapping/`):
+   - `data_enricher.py`: Anreicherung von GitHub-Daten mit zusätzlichen Informationen
+   - `repository_mapper.py`: Mapping von GitHub-Archive-Events auf Datenbankmodelle
+
+4. **Monitoring und Batch-Verarbeitung** (`monitoring/`, `processing/`):
+   - `performance_monitor.py`: Überwachung der Anwendungsleistung
+   - `batch_processor.py`: Effiziente Batch-Verarbeitung für Datenbankoperationen
+
+Diese Module bieten eine solide Grundlage für zukünftige Erweiterungen des Systems und können je nach Bedarf aktiviert und in die Hauptanwendung integriert werden.
 
 ## 🧪 Tests
 

@@ -65,16 +65,15 @@ class Cache:
     def _promote_to_memory(self, key: str, value: Any) -> None:
         """Promote item to memory cache, managing size limits."""
         with self._memory_cache_lock:
+            # Check if we need to evict items before adding new one
             if len(self._memory_cache) >= self.config.memory_cache_size:
-                # Remove least accessed items
-                sorted_items = sorted(
+                # Remove least accessed item
+                least_accessed = min(
                     self._access_counts.items(),
                     key=lambda x: x[1]
                 )
-                to_remove = sorted_items[:len(sorted_items) // 4]  # Remove 25%
-                for k, _ in to_remove:
-                    self._memory_cache.pop(k, None)
-                    self._access_counts.pop(k, None)
+                self._memory_cache.pop(least_accessed[0], None)
+                self._access_counts.pop(least_accessed[0], None)
                     
             self._memory_cache[key] = value
             self._increment_access(key)
@@ -102,7 +101,7 @@ class DataEnricher:
     
     def __init__(self, config: ETLConfig, cache_dir: Path):
         self.config = config
-        self.github_api = GitHubAPI(config.api.token)
+        self.github_api = GitHubAPI(config.github.access_token)
         self.cache = Cache(CacheConfig(), cache_dir)
         self._rate_limit_lock = threading.Lock()
         self._last_api_call = 0.0
@@ -142,8 +141,32 @@ class DataEnricher:
                     'forks': repo_data.get('forks_count', 0),
                     'created_at': repo_data.get('created_at'),
                     'updated_at': repo_data.get('updated_at'),
-                    'topics': repo_data.get('topics', [])
+                    'topics': repo_data.get('topics', []),
+                    'is_fork': repo_data.get('fork', False),
+                    'is_archived': repo_data.get('archived', False),
+                    'is_disabled': repo_data.get('disabled', False),
+                    'license': repo_data.get('license', {}).get('key'),
+                    'default_branch': repo_data.get('default_branch', 'master'),
+                    'open_issues_count': repo_data.get('open_issues_count', 0),
+                    'has_issues': repo_data.get('has_issues', True),
+                    'has_projects': repo_data.get('has_projects', True),
+                    'has_wiki': repo_data.get('has_wiki', True)
                 }
+                
+                # Add organization information if repository belongs to an organization
+                owner_data = repo_data.get('owner', {})
+                if owner_data.get('type') == 'Organization':
+                    # Enrich organization data
+                    org_dict = {
+                        'id': owner_data.get('id'),
+                        'login': owner_data.get('login'),
+                        'type': 'Organization'
+                    }
+                    enriched_org = self.enrich_organization(org_dict)
+                    enriched_data['organization'] = enriched_org
+                    enriched_data['owner_type'] = 'Organization'
+                else:
+                    enriched_data['owner_type'] = 'User'
                 
                 # Cache the enriched data
                 self.cache.set(cache_key, enriched_data)
@@ -320,6 +343,56 @@ class DataEnricher:
             
         return issue_dict
         
+    def enrich_organization(self, org_dict: Dict) -> Dict:
+        """
+        Enrich organization data with additional information from GitHub API.
+        
+        Args:
+            org_dict: Basic organization information
+            
+        Returns:
+            Dict: Enriched organization data
+        """
+        org_id = org_dict['id']
+        cache_key = f'org:{org_id}'
+        
+        # Check cache first
+        cached_data = self.cache.get(cache_key)
+        if cached_data:
+            return cached_data
+            
+        try:
+            # Respect API rate limits
+            self._wait_for_rate_limit()
+            
+            # Fetch additional data
+            org_data = self.github_api.get_organization(org_dict['login'])
+            
+            if org_data:
+                enriched_data = {
+                    **org_dict,
+                    'name': org_data.get('name'),
+                    'description': org_data.get('description'),
+                    'blog': org_data.get('blog'),
+                    'location': org_data.get('location'),
+                    'email': org_data.get('email'),
+                    'twitter_username': org_data.get('twitter_username'),
+                    'public_repos': org_data.get('public_repos', 0),
+                    'followers': org_data.get('followers', 0),
+                    'following': org_data.get('following', 0),
+                    'created_at': org_data.get('created_at'),
+                    'updated_at': org_data.get('updated_at')
+                }
+                
+                # Cache the enriched data
+                self.cache.set(cache_key, enriched_data)
+                return enriched_data
+                
+        except Exception as e:
+            logger.error(f"Error enriching organization {org_id}: {e}")
+            
+        return org_dict
+        
     def batch_enrich_events(self, events: List[Dict]) -> List[Dict]:
         """
         Enrich multiple events in parallel, respecting rate limits.
@@ -332,7 +405,7 @@ class DataEnricher:
         """
         enriched_events = []
         
-        with ThreadPoolExecutor(max_workers=self.config.api.parallel_requests) as executor:
+        with ThreadPoolExecutor(max_workers=self.config.github.parallel_requests) as executor:
             # Group events by type for efficient processing
             event_groups = self._group_events_by_type(events)
             
@@ -400,8 +473,8 @@ class DataEnricher:
             current_time = time.time()
             time_since_last_call = current_time - self._last_api_call
             
-            if time_since_last_call < self.config.api.rate_limit_delay:
-                time.sleep(self.config.api.rate_limit_delay - time_since_last_call)
+            if time_since_last_call < self.config.github.rate_limit_delay:
+                time.sleep(self.config.github.rate_limit_delay - time_since_last_call)
                 
             self._last_api_call = time.time()
             

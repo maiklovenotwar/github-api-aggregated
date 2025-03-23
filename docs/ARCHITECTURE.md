@@ -45,65 +45,73 @@ graph TD
   4. Caching
 
 #### BigQuery/GitHub Archive
-- **Komponente**: `bigquery_client.py`
+- **Komponente**: `bigquery_api.py`
 - **Funktion**: Historische Event-Daten
 - **Prozess**:
-  1. Query-Generierung (`query_builder.py`)
-  2. Kostenabschätzung
-  3. Batch-Ausführung
-  4. Streaming-Verarbeitung
+  1. Query-Generierung
+  2. Abfrage der GitHub Archive-Daten
+  3. Ergebnisverarbeitung
+  4. Optimierung für Abfragelimits (1 GB)
 
 ### 2. Datenverarbeitung
 
-#### ETL Orchestrator
+#### ETL-Orchestrator
 - **Komponente**: `etl_orchestrator.py`
-- **Hauptfunktionen**:
-  - Koordination der Datenquellen
-  - Parallelisierung
-  - Fehlerbehandlung
-  - Fortschrittsverfolgung
+- **Funktion**: Koordination der Datenerfassung und -verarbeitung
+- **Prozess**:
+  1. Repository-Verarbeitung
+  2. Event-Verarbeitung
+  3. Fehlerbehandlung
+  4. Batch-Verarbeitung
 
-```mermaid
-sequenceDiagram
-    participant ETL as ETL Orchestrator
-    participant API as GitHub API
-    participant BQ as BigQuery
-    participant DB as Datenbank
-    
-    ETL->>API: Repository-Anfrage
-    API-->>ETL: Metadaten
-    ETL->>BQ: Event-Abfrage
-    BQ-->>ETL: Event-Daten
-    ETL->>ETL: Datenvalidierung
-    ETL->>ETL: Datenanreicherung
-    ETL->>DB: Speicherung
-    DB-->>ETL: Bestätigung
-```
+#### Datenanreicherung
+- **Komponente**: `enrichment/data_enricher.py`
+- **Funktion**: Anreicherung von Daten aus verschiedenen Quellen
+- **Prozess**:
+  1. Anreicherung von Repository-Daten
+  2. Anreicherung von User-Daten
+  3. Anreicherung von Event-Daten
+  4. Caching zur Optimierung
 
 ### 3. Datenspeicherung
 
-#### Datenbankschema
+#### Datenbank
+- **Komponente**: `database/database.py`
+- **Funktion**: SQLite-Datenbank mit SQLAlchemy ORM
+- **Entitäten**:
+  - Repository
+  - User
+  - Organization
+  - Event
 
-```mermaid
-erDiagram
-    Repository ||--o{ Event : "hat"
-    Repository {
-        integer repo_id
-        string name
-        string full_name
-        datetime created_at
-        datetime updated_at
-        integer stars
-        integer forks
-    }
-    Event {
-        integer event_id
-        integer repo_id
-        string type
-        datetime created_at
-        json payload
-    }
-```
+### 4. Analyse
+
+#### Standortanalyse
+- **Komponente**: `analysis/location_analysis.py`
+- **Funktion**: Analyse von Standortdaten
+- **Prozess**:
+  1. Analyse von Contributor-Standorten
+  2. Analyse von Organisationsstandorten
+  3. Identifikation aktiver Regionen
+
+#### Organisationsanalyse
+- **Komponente**: `analysis/organization_analysis.py`
+- **Funktion**: Analyse von Organisationsdaten
+- **Prozess**:
+  1. Analyse von Organisationsaktivitäten
+  2. Analyse von Organisationsmitgliedern
+  3. Analyse von Organisationsrepositorien
+
+### 5. Überwachung
+
+#### Performance-Monitoring
+- **Komponente**: `monitoring/performance_monitor.py`
+- **Funktion**: Überwachung der Pipeline-Performance
+- **Metriken**:
+  1. Verarbeitungszeit
+  2. Speichernutzung
+  3. API-Aufrufe
+  4. Fehlerrate
 
 ## 🔧 Komponenten
 
