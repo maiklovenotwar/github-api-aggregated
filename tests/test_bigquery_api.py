@@ -63,52 +63,6 @@ def test_get_repository_events(bigquery_client):
     assert events[0]['type'] == 'PushEvent'
     assert events[0]['actor']['login'] == 'user1'
 
-def test_get_trending_repositories(bigquery_client):
-    """Test getting trending repositories."""
-    # Mock query result
-    mock_result = [{
-        'full_name': 'test/repo',
-        'stars': 100,
-        'contributors': 10,
-        'commits': 500
-    }]
-    
-    bigquery_client._execute_query = MagicMock(return_value=mock_result)
-    
-    # Test trending repos retrieval
-    repos = bigquery_client.get_trending_repositories(
-        since=datetime.now(timezone.utc) - timedelta(days=30),
-        min_stars=10
-    )
-    
-    assert len(repos) == 1
-    assert repos[0]['full_name'] == 'test/repo'
-    assert repos[0]['stars'] == 100
-
-def test_get_repository_contributors(bigquery_client):
-    """Test getting repository contributors."""
-    # Mock query result
-    now = datetime.now(timezone.utc)
-    mock_result = [{
-        'login': 'user1',
-        'id': 1,
-        'commits': 50,
-        'first_contribution': now - timedelta(days=30),
-        'last_contribution': now
-    }]
-    
-    bigquery_client._execute_query = MagicMock(return_value=mock_result)
-    
-    # Test contributor retrieval
-    contributors = bigquery_client.get_repository_contributors(
-        full_name='test/repo',
-        since=datetime.now(timezone.utc) - timedelta(days=30)
-    )
-    
-    assert len(contributors) == 1
-    assert contributors[0]['login'] == 'user1'
-    assert contributors[0]['commits'] == 50
-
 def test_empty_results(bigquery_client):
     """Test handling of empty results."""
     bigquery_client._execute_query = MagicMock(return_value=[])
@@ -122,19 +76,7 @@ def test_empty_results(bigquery_client):
     
     # Test events
     events = bigquery_client.get_repository_events(
-        full_name='test/repo'
+        full_name='test/repo',
+        since=datetime.now(timezone.utc) - timedelta(days=1)
     )
     assert events == []
-    
-    # Test trending
-    repos = bigquery_client.get_trending_repositories(
-        since=datetime.now(timezone.utc) - timedelta(days=30)
-    )
-    assert repos == []
-    
-    # Test contributors
-    contributors = bigquery_client.get_repository_contributors(
-        full_name='test/repo',
-        since=datetime.now(timezone.utc) - timedelta(days=30)
-    )
-    assert contributors == []

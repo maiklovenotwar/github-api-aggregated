@@ -7,10 +7,9 @@ from sqlalchemy.orm import Session
 
 from src.github_database.database.database import (
     Base,
-    User,
+    Contributor,
     Organization,
     Repository,
-    Event,
     init_db
 )
 
@@ -23,29 +22,34 @@ def engine():
 def session(engine):
     """Create test database session."""
     Base.metadata.create_all(engine)
-    Session = init_db('sqlite:///:memory:')
+    Session = init_db('sqlite:///:memory:', reset_db=True)
     session = Session()
     yield session
     session.close()
     Base.metadata.drop_all(engine)
 
-def test_user_model(session):
-    """Test User model."""
-    user = User(
+def test_contributor_model(session):
+    """Test Contributor model."""
+    contributor = Contributor(
         id=1,
         login='testuser',
         name='Test User',
         email='test@example.com',
         type='User',
+        location='San Francisco, USA',
+        country_code='US',
+        region='North America',
         created_at=datetime.now(timezone.utc)
     )
-    session.add(user)
+    session.add(contributor)
     session.commit()
     
-    saved_user = session.query(User).first()
-    assert saved_user.id == 1
-    assert saved_user.login == 'testuser'
-    assert saved_user.type == 'User'
+    saved_contributor = session.query(Contributor).first()
+    assert saved_contributor.id == 1
+    assert saved_contributor.login == 'testuser'
+    assert saved_contributor.type == 'User'
+    assert saved_contributor.country_code == 'US'
+    assert saved_contributor.region == 'North America'
 
 def test_organization_model(session):
     """Test Organization model."""
@@ -54,6 +58,9 @@ def test_organization_model(session):
         login='testorg',
         name='Test Org',
         email='org@example.com',
+        location='Berlin, Germany',
+        country_code='DE',
+        region='Europe',
         created_at=datetime.now(timezone.utc)
     )
     session.add(org)
@@ -62,72 +69,19 @@ def test_organization_model(session):
     saved_org = session.query(Organization).first()
     assert saved_org.id == 1
     assert saved_org.login == 'testorg'
+    assert saved_org.country_code == 'DE'
+    assert saved_org.region == 'Europe'
 
 def test_repository_model(session):
     """Test Repository model."""
-    # Create user
-    user = User(
+    # Create contributor
+    contributor = Contributor(
         id=1,
         login='testuser',
         type='User'
     )
-    session.add(user)
+    session.add(contributor)
     
-    # Create repository
-    repo = Repository(
-        id=1,
-        name='test-repo',
-        full_name='testuser/test-repo',
-        owner=user,
-        description='Test repository',
-        language='Python',
-        created_at=datetime.now(timezone.utc)
-    )
-    session.add(repo)
-    session.commit()
-    
-    saved_repo = session.query(Repository).first()
-    assert saved_repo.id == 1
-    assert saved_repo.name == 'test-repo'
-    assert saved_repo.owner.login == 'testuser'
-
-def test_event_model(session):
-    """Test Event model."""
-    # Create user and repository
-    user = User(
-        id=1,
-        login='testuser',
-        type='User'
-    )
-    session.add(user)
-    
-    repo = Repository(
-        id=1,
-        name='test-repo',
-        full_name='testuser/test-repo',
-        owner=user
-    )
-    session.add(repo)
-    
-    # Create event
-    event = Event(
-        id='123',
-        type='PushEvent',
-        actor=user,
-        repository=repo,
-        created_at=datetime.now(timezone.utc)
-    )
-    session.add(event)
-    session.commit()
-    
-    saved_event = session.query(Event).first()
-    assert saved_event.id == '123'
-    assert saved_event.type == 'PushEvent'
-    assert saved_event.actor.login == 'testuser'
-    assert saved_event.repository.name == 'test-repo'
-
-def test_relationships(session):
-    """Test model relationships."""
     # Create organization
     org = Organization(
         id=1,
@@ -136,41 +90,85 @@ def test_relationships(session):
     )
     session.add(org)
     
-    # Create user
-    user = User(
-        id=1,
-        login='testuser',
-        type='User'
-    )
-    session.add(user)
-    
-    # Add user to organization
-    org.members.append(user)
-    
-    # Create repository in organization
+    # Create repository
     repo = Repository(
         id=1,
         name='test-repo',
         full_name='testorg/test-repo',
-        owner=user,
-        organization=org
+        description='Test repository',
+        language='Python',
+        stargazers_count=100,
+        forks_count=50,
+        created_at=datetime.now(timezone.utc),
+        organization_id=1,
+        owner_id=1
     )
     session.add(repo)
     
-    # Create event
-    event = Event(
-        id='123',
-        type='PushEvent',
-        actor=user,
-        repository=repo,
-        created_at=datetime.now(timezone.utc)
-    )
-    session.add(event)
+    # Add contributor to repository
+    repo.contributors.append(contributor)
+    
     session.commit()
     
-    # Test relationships
-    assert user in org.members
-    assert repo in org.repositories
-    assert repo.owner == user
-    assert repo.organization == org
-    assert event in repo.events
+    saved_repo = session.query(Repository).first()
+    assert saved_repo.id == 1
+    assert saved_repo.name == 'test-repo'
+    assert saved_repo.organization.login == 'testorg'
+    assert len(saved_repo.contributors) == 1
+    assert saved_repo.contributors[0].login == 'testuser'
+
+def test_relationships(session):
+    """Test model relationships."""
+    # Create contributors
+    contributor1 = Contributor(id=1, login='user1', type='User')
+    contributor2 = Contributor(id=2, login='user2', type='User')
+    session.add_all([contributor1, contributor2])
+    
+    # Create organizations
+    org1 = Organization(id=1, login='org1')
+    org2 = Organization(id=2, login='org2')
+    session.add_all([org1, org2])
+    
+    # Create repositories
+    repo1 = Repository(
+        id=1,
+        name='repo1',
+        full_name='org1/repo1',
+        organization_id=1,
+        owner_id=1
+    )
+    repo2 = Repository(
+        id=2,
+        name='repo2',
+        full_name='org2/repo2',
+        organization_id=2,
+        owner_id=1
+    )
+    session.add_all([repo1, repo2])
+    
+    # Add contributors to repositories
+    repo1.contributors.append(contributor1)
+    repo1.contributors.append(contributor2)
+    repo2.contributors.append(contributor1)
+    
+    session.commit()
+    
+    # Test organization-repository relationship
+    assert len(org1.repositories) == 1
+    assert org1.repositories[0].name == 'repo1'
+    assert len(org2.repositories) == 1
+    assert org2.repositories[0].name == 'repo2'
+    
+    # Test repository-contributor relationship
+    assert len(repo1.contributors) == 2
+    assert repo1.contributors[0].login == 'user1'
+    assert repo1.contributors[1].login == 'user2'
+    assert len(repo2.contributors) == 1
+    assert repo2.contributors[0].login == 'user1'
+    
+    # Test contributor-repository relationship
+    assert len(contributor1.repositories) == 2
+    assert contributor1.repositories[0].name == 'repo1'
+    assert contributor1.repositories[1].name == 'repo2'
+    assert len(contributor2.repositories) == 1
+    assert contributor2.repositories[0].name == 'repo1'

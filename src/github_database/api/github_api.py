@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from ..config.github_config import GitHubConfig
+from .token_pool import TokenPool
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -304,9 +306,10 @@ def get_repositories_since(since_id: Optional[int] = None, per_page: int = 100, 
 class GitHubAPIClient:
     """GitHub API client class."""
     
-    def __init__(self, config: GitHubConfig):
+    def __init__(self, config: GitHubConfig, token_pool: Optional[TokenPool] = None):
         """Initialize GitHub API client."""
         self.config = config
+        self.token_pool = token_pool
         
         # Configure session with retries
         self.session = requests.Session()
@@ -317,76 +320,220 @@ class GitHubAPIClient:
         )
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
         
-        # Set default headers
-        self.session.headers.update({
-            'Accept': 'application/vnd.github.v3+json',
-            'Authorization': f'token {config.access_token}'
-        })
-        
+        # Set default headers if no token pool is provided
+        if not token_pool:
+            self.session.headers.update({
+                'Accept': 'application/vnd.github.v3+json',
+                'Authorization': f'token {config.access_token}'
+            })
+        else:
+            # Nur Accept-Header setzen, Token wird pro Anfrage gesetzt
+            self.session.headers.update({
+                'Accept': 'application/vnd.github.v3+json'
+            })
+            
+        # Cache für Repository-, User- und Organization-Daten
+        self.repo_cache = {}
+        self.user_cache = {}
+        self.org_cache = {}
+    
     def _get(self, url: str, params: Optional[Dict] = None) -> Dict:
         """Make GET request to GitHub API."""
-        response = self.session.get(url, params=params)
-        if response.status_code == 403 and 'X-RateLimit-Remaining' in response.headers and int(response.headers['X-RateLimit-Remaining']) == 0:
+        # Wenn ein Token-Pool verfügbar ist, verwende einen Token aus dem Pool
+        token_idx = None
+        if self.token_pool:
+            token, token_idx = self.token_pool.get_token()
+            headers = {'Authorization': f'token {token}'}
+        else:
+            headers = None
+            
+        response = self.session.get(url, params=params, headers=headers)
+        
+        # Verarbeite Rate-Limit-Informationen
+        if 'X-RateLimit-Remaining' in response.headers and 'X-RateLimit-Reset' in response.headers:
+            remaining = int(response.headers['X-RateLimit-Remaining'])
             reset_time = int(response.headers['X-RateLimit-Reset'])
-            raise RateLimitError(f"Rate limit exceeded. Reset at {datetime.fromtimestamp(reset_time)}", reset_time)
+            
+            # Aktualisiere Token-Pool, wenn verfügbar
+            if self.token_pool and token_idx is not None:
+                self.token_pool.update_rate_limit(token_idx, remaining, reset_time)
+            
+            # Prüfe auf Rate-Limit-Überschreitung
+            if response.status_code == 403 and remaining == 0:
+                reset_datetime = datetime.fromtimestamp(reset_time)
+                raise RateLimitError(f"Rate limit exceeded. Reset at {reset_datetime}", reset_time)
+                
         response.raise_for_status()
         return response.json()
     
     def get_repository(self, owner: str, name: str) -> Dict:
         """Get repository by owner and name."""
+        cache_key = f"{owner}/{name}"
+        
+        # Prüfe, ob das Repository bereits im Cache ist
+        if cache_key in self.repo_cache:
+            logging.debug(f"Cache hit for repository {cache_key}")
+            return self.repo_cache[cache_key]
+            
+        # Repository nicht im Cache, hole es von der API
         url = f"{GITHUB_API_BASE}/repos/{owner}/{name}"
-        return self._get(url)
+        repo_data = self._get(url)
+        
+        # Speichere das Repository im Cache
+        self.repo_cache[cache_key] = repo_data
+        return repo_data
     
     def get_organization(self, login: str) -> Dict:
         """Get organization by login."""
+        # Prüfe, ob die Organisation bereits im Cache ist
+        if login in self.org_cache:
+            logging.debug(f"Cache hit for organization {login}")
+            return self.org_cache[login]
+            
+        # Organisation nicht im Cache, hole sie von der API
         url = f"{GITHUB_API_BASE}/orgs/{login}"
-        return self._get(url)
+        org_data = self._get(url)
+        
+        # Speichere die Organisation im Cache
+        self.org_cache[login] = org_data
+        return org_data
     
     def get_user(self, login: str) -> Dict:
         """Get user by login."""
+        # Prüfe, ob der Benutzer bereits im Cache ist
+        if login in self.user_cache:
+            logging.debug(f"Cache hit for user {login}")
+            return self.user_cache[login]
+            
+        # Benutzer nicht im Cache, hole ihn von der API
         url = f"{GITHUB_API_BASE}/users/{login}"
-        return self._get(url)
+        user_data = self._get(url)
         
-    def search_repositories(self, min_stars: int = 10, limit: int = 100) -> List[Dict[str, Any]]:
+        # Speichere den Benutzer im Cache
+        self.user_cache[login] = user_data
+        return user_data
+        
+    def search_repositories(self, min_stars: int = 10, min_forks: int = 0, limit: int = 100, 
+                           language: Optional[str] = None, created_after: Optional[str] = None,
+                           created_before: Optional[str] = None, sort_by: str = "stars", 
+                           sort_order: str = "desc") -> List[Dict[str, Any]]:
         """
-        Search for repositories with a minimum number of stars.
+        Search for repositories with minimum quality thresholds.
         
         Args:
             min_stars: Minimum number of stars a repository must have
+            min_forks: Minimum number of forks a repository must have
             limit: Maximum number of repositories to return
+            language: Optional filter for programming language
+            created_after: Optional filter for repositories created after a specific date (YYYY-MM-DD)
+            created_before: Optional filter for repositories created before a specific date (YYYY-MM-DD)
+            sort_by: Field to sort by ("stars", "forks", "updated", "help-wanted-issues")
+            sort_order: Sort order ("desc" or "asc")
             
         Returns:
             List of repository data dictionaries
         """
+        # Cache-Key für diese Suche
+        cache_key = f"search_stars{min_stars}_forks{min_forks}_limit{limit}_lang{language}_after{created_after}_before{created_before}_sort{sort_by}_{sort_order}"
+        
+        # Prüfe, ob wir bereits Ergebnisse für diese Suche im Cache haben
+        if hasattr(self, 'search_cache') and cache_key in self.search_cache:
+            logging.info(f"Using cached search results for {cache_key}")
+            return self.search_cache[cache_key]
+        
+        # Initialisiere den Such-Cache, falls er noch nicht existiert
+        if not hasattr(self, 'search_cache'):
+            self.search_cache = {}
+        
         url = f"{GITHUB_API_BASE}/search/repositories"
+        query = f"stars:>={min_stars}"
+        if min_forks > 0:
+            query += f" forks:>={min_forks}"
+        if language:
+            query += f" language:{language}"
+        if created_after:
+            query += f" created:>={created_after}"
+        if created_before:
+            query += f" created:<{created_before}"
+            
         params = {
-            "q": f"stars:>={min_stars}",
-            "sort": "stars",
-            "order": "desc",
-            "per_page": min(100, limit)  # GitHub API maximum is 100 per page
+            "q": query,
+            "sort": sort_by,
+            "order": sort_order,
+            "per_page": 100  # GitHub API maximum is 100 per page
         }
         
         repositories = []
+        page = 1
+        total_collected = 0
+        
         try:
-            response = self._get(url, params)
-            repositories = response.get("items", [])[:limit]
+            while total_collected < limit:
+                params["page"] = page
+                
+                # Erstelle einen Cache-Key für diese spezifische Seite
+                page_cache_key = f"{cache_key}_page{page}"
+                page_results = None
+                
+                # Prüfe, ob wir bereits Ergebnisse für diese Seite im Cache haben
+                if hasattr(self, 'page_cache') and page_cache_key in self.page_cache:
+                    logging.debug(f"Using cached page results for {page_cache_key}")
+                    page_results = self.page_cache[page_cache_key]
+                else:
+                    # Initialisiere den Seiten-Cache, falls er noch nicht existiert
+                    if not hasattr(self, 'page_cache'):
+                        self.page_cache = {}
+                    
+                    # Hole die Ergebnisse von der API
+                    response = self._get(url, params)
+                    page_results = response.get("items", [])
+                    
+                    # Speichere die Ergebnisse im Seiten-Cache
+                    self.page_cache[page_cache_key] = page_results
+                
+                if not page_results:
+                    break
+                
+                # Format the repositories similar to BigQuery results
+                for repo in page_results:
+                    if total_collected >= limit:
+                        break
+                        
+                    # Speichere das vollständige Repository-Objekt im Repository-Cache
+                    repo_full_name = repo["full_name"]
+                    if repo_full_name not in self.repo_cache:
+                        self.repo_cache[repo_full_name] = repo
+                    
+                    repositories.append({
+                        "full_name": repo["full_name"],
+                        "stars": repo["stargazers_count"],
+                        "forks": repo["forks_count"],
+                        "contributors": 0,  # This would require additional API calls to get
+                        "commits": 0        # This would require additional API calls to get
+                    })
+                    total_collected += 1
+                
+                # Check if we've reached the end of results
+                if len(page_results) < 100 or total_collected >= limit:
+                    break
+                    
+                # Move to next page
+                page += 1
+                
+                # Add a small delay to avoid rate limiting
+                time.sleep(0.5)
             
-            # Format the repositories similar to BigQuery results
-            formatted_repos = []
-            for repo in repositories:
-                formatted_repos.append({
-                    "full_name": repo["full_name"],
-                    "stars": repo["stargazers_count"],
-                    "contributors": 0,  # This would require additional API calls to get
-                    "commits": 0        # This would require additional API calls to get
-                })
+            logging.info(f"Fetched {len(repositories)} repositories in {page} pages")
             
-            return formatted_repos
+            # Speichere die Ergebnisse im Such-Cache
+            self.search_cache[cache_key] = repositories
+            
+            return repositories
             
         except Exception as e:
             logging.error(f"Error searching repositories: {e}")
             return []
-
+    
 def create_repository_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
     """Create repository dictionary from API data."""
     return {

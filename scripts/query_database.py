@@ -193,7 +193,7 @@ def main():
         
         # Datenbank initialisieren
         logger.info(f"Verbinde mit Datenbank: {database_url}")
-        Session = init_db(database_url)
+        Session = init_db(database_url, reset_db=False)
         session = Session()
         
         # Beispielabfragen

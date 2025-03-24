@@ -7,10 +7,12 @@ Ein hochperformantes ETL-System zur Analyse von GitHub-Aktivitätsdaten durch hy
 - Hybride Datenerfassung (GitHub API + BigQuery)
 - Effiziente Verarbeitung von GitHub Archive Events via BigQuery
 - Anreicherung mit GitHub API-Metadaten
-- Parallele Batch-Verarbeitung
-- Intelligentes Caching-System
+- Parallele Batch-Verarbeitung mit konfigurierbarer Worker-Anzahl
+- Intelligentes Caching-System mit Thread-Sicherheit
 - Performance-Monitoring und Visualisierung
 - Robuste Fehlerbehandlung und Wiederaufnahme
+- Asynchrones Geocoding für verbesserte Performance
+- Optimierte Standortdatenextraktion mit Nominatim
 
 ## 🏗 Projektstruktur
 
@@ -20,6 +22,7 @@ github-api/
 │   └── github_database/
 │       ├── api/                    # GitHub API Integration
 │       │   ├── github_api.py       # API-Client und Rate-Limiting
+│       │   ├── token_pool.py       # Token-Verwaltung für API-Anfragen
 │       │   └── bigquery_api.py     # BigQuery-Client für GitHub Archive
 │       │
 │       ├── analysis/               # Datenanalyse-Komponenten
@@ -27,17 +30,18 @@ github-api/
 │       │   └── organization_analysis.py # Organisationsanalyse
 │       │
 │       ├── control_database/       # Datenbankvalidierung und -kontrolle
-│       │   └── validate_data.py    # Datenvalidierungsfunktionen
+│       │   └── control_data.py     # Datenvalidierungsfunktionen
 │       │
 │       ├── database/               # Datenbankmodelle und Verwaltung
 │       │   ├── database.py         # SQLAlchemy-Modelle
 │       │   └── migrations/         # Alembic Migrationsskripte
 │       │
-│       ├── enrichment/             # Datenanreicherung
-│       │   └── data_enricher.py    # Anreicherung mit API-Daten
+│       ├── aggregation/            # Datenaggregation
+│       │   └── data_aggregator.py  # Aggregation von Repository-Daten
 │       │
 │       ├── config/                 # Konfiguration
-│       │   ├── config.py           # Hauptkonfiguration
+│       │   ├── etl_config.py       # ETL-Konfiguration
+│       │   ├── github_config.py    # GitHub-spezifische Konfiguration
 │       │   └── bigquery_config.py  # BigQuery-spezifische Konfiguration
 │       │
 │       ├── monitoring/             # Performance-Überwachung
@@ -45,6 +49,7 @@ github-api/
 │       │
 │       ├── github_archive.py       # GitHub Archive Event-Typen
 │       ├── etl_orchestrator.py     # Hybride ETL-Prozesssteuerung
+│       ├── optimized_collector.py  # Optimierte parallele Datensammlung
 │       └── main.py                 # Hauptanwendung
 │
 ├── docs/                           # Dokumentation
@@ -53,7 +58,8 @@ github-api/
 │   └── USAGE.md                    # Nutzungsanleitungen
 │
 ├── tests/                          # Testsuite
-│   ├── test_hybrid_pipeline.py     # Tests für hybride Pipeline
+│   ├── test_etl_orchestrator.py    # Tests für ETL-Orchestrator
+│   ├── test_database_models.py     # Tests für Datenbankmodelle
 │   └── analyze_test_results.py     # Testanalyse und Visualisierung
 │
 ├── .env.template                  # Umgebungsvariablen-Template
@@ -71,9 +77,20 @@ github-api/
   - Intelligente Lastverteilung
   - Automatische Fehlerbehandlung
   - Fortschrittsverfolgung
+  - Asynchrones Geocoding für verbesserte Performance
+  - Thread-sicheres Caching für Standortdaten
+
+### Optimierter Datensammler
+- **Datei**: `optimized_collector.py`
+- **Funktion**: Parallele Verarbeitung von GitHub-Repositories
+- **Features**:
+  - Konfigurierbare Worker-Anzahl
+  - Batch-Verarbeitung zur Speicheroptimierung
+  - Separate Datenbank-Sessions pro Worker
+  - Fortschrittsüberwachung
 
 ### BigQuery Integration
-- **Datei**: `bigquery/bigquery_client.py`
+- **Datei**: `api/bigquery_api.py`
 - **Funktion**: Effiziente Abfrage historischer GitHub-Daten
 - **Features**:
   - Optimierte SQL-Queries
@@ -89,6 +106,15 @@ github-api/
   - Caching-System
   - Parallele Anfragen
   - Fehlertoleranz
+
+### Geocoding-Service
+- **Datei**: `etl_orchestrator.py`
+- **Funktion**: Extraktion von Ländercodes aus Freitext-Standortangaben
+- **Features**:
+  - Asynchrone Verarbeitung
+  - Intelligentes Caching
+  - Nominatim-Integration (OpenStreetMap)
+  - Fallback-Heuristik für nicht-geografische Standorte
 
 ## 🚀 Schnellstart
 
