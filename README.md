@@ -240,6 +240,10 @@ The database follows a relational model with three primary entities and two rela
 | `watchers_count` | Integer | Number of users watching the repository |
 | `forks_count` | Integer | Number of repository forks |
 | `open_issues_count` | Integer | Number of open issues |
+| `stars` | Integer | Alternative count of repository stars |
+| `forks` | Integer | Alternative count of repository forks |
+| `contributors_count` | Integer | Number of contributors to the repository |
+| `commits` | Integer | Total number of commits in the repository |
 | `created_at` | DateTime | Repository creation timestamp |
 | `updated_at` | DateTime | Last update timestamp |
 | `pushed_at` | DateTime | Last commit timestamp |
