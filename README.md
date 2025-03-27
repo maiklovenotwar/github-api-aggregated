@@ -159,6 +159,61 @@ The primary focus of this project is to analyze:
 
 This section provides a detailed overview of all data variables collected and stored in the database.
 
+### Database Schema Overview
+
+The database follows a relational model with three primary entities and two relationship tables:
+
+```
+┌───────────────┐       ┌─────────────────────┐       ┌────────────────┐
+│ Organization  │       │ contributor_repository │       │  Repository   │
+├───────────────┤       ├─────────────────────┤       ├────────────────┤
+│ id            │       │ contributor_id      │       │ id             │
+│ login         │       │ repository_id       │       │ name           │
+│ name          │◄──┐   │ contributions       │   ┌──►│ full_name      │
+│ ...           │   │   │ first_contribution_at│   │   │ owner_id       │
+└───────┬───────┘   │   │ last_contribution_at │   │   │ organization_id│
+        │           │   └─────────────────────┘   │   │ ...            │
+        │           │                             │   └────────┬───────┘
+        │           │   ┌─────────────────────┐   │            │
+        │           └───┤ contributor_organization ├───┘            │
+        │               ├─────────────────────┤                │
+        │               │ contributor_id      │                │
+        │               │ organization_id     │                │
+        │               │ joined_at           │                │
+        │               └─────────────────────┘                │
+        │                                                      │
+        │               ┌────────────────┐                     │
+        └───────────────┤  Contributor   ├─────────────────────┘
+                        ├────────────────┤
+                        │ id             │
+                        │ login          │
+                        │ name           │
+                        │ ...            │
+                        └────────────────┘
+```
+
+#### Key Relationships:
+
+1. **Repository to Contributor** (Many-to-Many):
+   - A repository can have multiple contributors
+   - A contributor can contribute to multiple repositories
+   - The `contributor_repository` table tracks this relationship with additional metadata about contributions
+
+2. **Repository to Organization** (Many-to-One):
+   - A repository can belong to one organization
+   - An organization can have multiple repositories
+   - The `organization_id` in the Repository table establishes this relationship
+
+3. **Contributor to Organization** (Many-to-Many):
+   - A contributor can be a member of multiple organizations
+   - An organization can have multiple contributors
+   - The `contributor_organization` table tracks this relationship
+
+4. **Repository to Owner** (Many-to-One):
+   - Every repository has exactly one owner (which is a Contributor)
+   - A contributor can own multiple repositories
+   - The `owner_id` in the Repository table establishes this relationship
+
 ### Repository Data
 
 | Variable | Type | Description |
@@ -166,8 +221,8 @@ This section provides a detailed overview of all data variables collected and st
 | `id` | Integer | Unique GitHub repository identifier |
 | `name` | String | Repository name (without owner) |
 | `full_name` | String | Complete repository name in format `owner/repo` |
-| `owner_id` | Integer | ID of the repository owner (contributor) |
-| `organization_id` | Integer | ID of the organization if repository belongs to one |
+| `owner_id` | Integer | ID of the repository owner (contributor) - Foreign key to `contributors.id` |
+| `organization_id` | Integer | ID of the organization if repository belongs to one - Foreign key to `organizations.id` |
 | `description` | Text | Repository description text |
 | `homepage` | String | URL to the project homepage |
 | `language` | String | Primary programming language used |
@@ -182,6 +237,12 @@ This section provides a detailed overview of all data variables collected and st
 | `created_at` | DateTime | Repository creation timestamp |
 | `updated_at` | DateTime | Last update timestamp |
 | `pushed_at` | DateTime | Last commit timestamp |
+
+#### Repository Data Usage:
+- Repositories are the central entity in the database, representing GitHub code repositories
+- Each repository is linked to its owner (a Contributor) and optionally to an Organization
+- Repository metrics like stars, forks, and issues are used for popularity and activity analysis
+- The language field enables programming language distribution analysis
 
 ### Contributor Data
 
@@ -206,6 +267,12 @@ This section provides a detailed overview of all data variables collected and st
 | `following` | Integer | Number of users being followed |
 | `created_at` | DateTime | Account creation timestamp |
 | `updated_at` | DateTime | Last profile update timestamp |
+
+#### Contributor Data Usage:
+- Contributors represent GitHub users who contribute to repositories
+- The `location`, `country_code`, and `region` fields are crucial for geographical analysis
+- A contributor can be both a repository owner and a contributor to other repositories
+- The same contributor data structure is used for individual users and organization owners
 
 ### Organization Data
 
@@ -232,25 +299,95 @@ This section provides a detailed overview of all data variables collected and st
 | `created_at` | DateTime | Organization creation timestamp |
 | `updated_at` | DateTime | Last profile update timestamp |
 
+#### Organization Data Usage:
+- Organizations represent GitHub organizations that host repositories
+- Like contributors, organizations have geographical data (`location`, `country_code`, `region`)
+- Organizations are linked to their repositories and contributors (members)
+- Organization data enables analysis of organizational influence in open-source communities
+
 ### Relationship Data
 
 #### Contributor-Repository Relationship
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `contributor_id` | Integer | ID of the contributor |
-| `repository_id` | Integer | ID of the repository |
+| `contributor_id` | Integer | ID of the contributor - Foreign key to `contributors.id` |
+| `repository_id` | Integer | ID of the repository - Foreign key to `repositories.id` |
 | `contributions` | Integer | Number of contributions made by the user to the repository |
 | `first_contribution_at` | DateTime | Timestamp of first contribution |
 | `last_contribution_at` | DateTime | Timestamp of most recent contribution |
+
+#### Contributor-Repository Relationship Usage:
+- This junction table implements the many-to-many relationship between contributors and repositories
+- It stores valuable metadata about the contribution relationship, such as:
+  - The number of contributions made by each contributor to each repository
+  - The timespan of contributions (first to last)
+- This data enables temporal analysis of contribution patterns
+- It's used to analyze how contributors engage with repositories over time
 
 #### Contributor-Organization Relationship
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `contributor_id` | Integer | ID of the contributor |
-| `organization_id` | Integer | ID of the organization |
+| `contributor_id` | Integer | ID of the contributor - Foreign key to `contributors.id` |
+| `organization_id` | Integer | ID of the organization - Foreign key to `organizations.id` |
 | `joined_at` | DateTime | Timestamp when the contributor joined the organization |
+
+#### Contributor-Organization Relationship Usage:
+- This junction table implements the many-to-many relationship between contributors and organizations
+- It tracks which contributors are members of which organizations
+- The `joined_at` timestamp allows for temporal analysis of organization membership
+- This data is used to analyze organizational influence and contributor affiliations
+
+### Data Collection and Enrichment Process
+
+1. **Repository Collection**:
+   - Repositories are collected using the GitHub API based on criteria like star count and creation date
+   - The collection is performed in small time periods to work around API limitations
+   - Basic repository metadata is stored in the `repositories` table
+
+2. **Contributor Collection**:
+   - For each repository, contributors are collected using the GitHub API
+   - Contributor profiles are fetched to get detailed information
+   - The contributor-repository relationship is established with contribution counts
+
+3. **Organization Collection**:
+   - Organizations are collected from repository ownership data
+   - Organization profiles are fetched to get detailed information
+   - Organization-contributor relationships are established
+
+4. **Geographical Enrichment**:
+   - Location strings from contributors and organizations are geocoded
+   - Country codes and regions are extracted and stored
+   - This enrichment enables geographical analysis of contributions
+
+5. **Data Updates**:
+   - The system can update existing data to reflect changes in repositories, contributors, and organizations
+   - Updates preserve historical data while adding new information
+
+### Data Analysis Capabilities
+
+The database schema enables various types of analyses:
+
+1. **Geographic Distribution Analysis**:
+   - Map contributors and organizations by country and region
+   - Analyze contribution patterns across different geographical areas
+   - Identify emerging open-source hubs globally
+
+2. **Temporal Analysis**:
+   - Track contribution patterns over time
+   - Analyze repository growth and activity
+   - Identify trends in open-source participation
+
+3. **Network Analysis**:
+   - Analyze collaboration networks between contributors
+   - Examine organizational relationships and influence
+   - Identify key contributors and their impact across repositories
+
+4. **Programming Language Analysis**:
+   - Analyze the distribution of programming languages
+   - Identify regional preferences for certain languages
+   - Track language popularity trends over time
 
 ## 🔧 Configuration
 
