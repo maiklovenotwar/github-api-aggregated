@@ -1,6 +1,6 @@
 # GitHub Global Contribution Analysis
 
-A high-performance ETL system for analyzing global GitHub contribution patterns through geographical data enrichment and analysis. This system uses a hybrid approach combining the GitHub API and BigQuery/GitHub Archive for comprehensive insights.
+A high-performance ETL system for analyzing global GitHub contribution patterns through geographical data enrichment and analysis. This system focuses on efficient collection of GitHub repository data and geographical analysis of contribution patterns.
 
 ## 🌍 Project Focus
 
@@ -13,13 +13,12 @@ This project focuses on analyzing geographical patterns in open-source contribut
 
 ## 🌟 Key Features
 
-- **Hybrid Data Collection**: Combines GitHub API (for detailed metadata) and BigQuery/GitHub Archive (for historical events)
+- **Efficient GitHub API Integration**: Optimized for collecting detailed repository and contributor metadata
 - **Geographical Enrichment**: Extracts and geocodes location data from contributors and organizations
 - **Efficient Collection Strategies**:
-  - Star-based collection for popular repositories (configurable star ranges)
-  - Time-period collection for historical analysis
+  - Star-based collection for popular repositories
+  - Time-period collection for historical analysis with optimized period sizing
 - **Performance Optimizations**:
-  - Multi-threaded parallel processing with configurable worker count
   - Token pool management for handling GitHub API rate limits
   - Intelligent caching system for reducing API calls
   - Progress tracking with resume capability
@@ -34,15 +33,14 @@ This project focuses on analyzing geographical patterns in open-source contribut
 
 - Python 3.8+
 - GitHub API token(s)
-- [Optional] Google Cloud account for BigQuery access
 - SQLAlchemy-compatible database (SQLite by default)
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/github-global-contributions.git
-cd github-global-contributions
+git clone https://github.com/yourusername/github-api-aggregated.git
+cd github-api-aggregated
 
 # Create and activate virtual environment
 python -m venv venv
@@ -59,27 +57,21 @@ cp .env.template .env
 ### Basic Usage
 
 ```bash
-# Collect repositories using star ranges strategy
-python -m src.github_database.main --mode collect --collection-strategy star-ranges --min-stars 50 --limit 1000
-
 # Collect repositories using time period strategy
-python -m src.github_database.main --mode collect --collection-strategy time-period --start-year 2015 --end-year 2023 --limit 500
+python -m src.github_database.main --mode collect --collection-strategy time-period --start-year 2015 --end-year 2023 --min-stars 50 --limit 1000
 
 # Enrich collected data with geographical information
 python -m src.github_database.main --mode enrich
 
-# Aggregate data for analysis
-python -m src.github_database.main --mode aggregate --start-year 2015 --end-year 2023
-
-# Export aggregated data to CSV files
-python -m src.github_database.main --mode export --output-dir ./data/exports
+# Export data to CSV files
+python -m src.github_database.main --mode export --output-dir ./exports
 ```
 
 ### Advanced Usage
 
 ```bash
-# Parallel collection with multiple tokens and custom star ranges
-python -m src.github_database.main --mode collect --collection-strategy star-ranges --parallel --workers 10 --tokens TOKEN1 TOKEN2 TOKEN3 --star-ranges "[(10000, None), (5000, 9999), (1000, 4999), (500, 999)]" --limit 2000
+# Parallel collection with multiple tokens
+python -m src.github_database.main --mode collect --collection-strategy time-period --parallel --workers 10 --tokens TOKEN1 TOKEN2 TOKEN3 --start-year 2020 --end-year 2023 --min-stars 100 --limit 2000
 
 # Update existing geographical data
 python -m src.github_database.main --mode enrich --update-existing
@@ -94,41 +86,52 @@ github-api-aggregated/
 │       ├── api/                    # API Integration
 │       │   ├── github_api.py       # GitHub API client with rate limiting
 │       │   ├── token_pool.py       # Token management for API requests
-│       │   └── bigquery_api.py     # BigQuery client for GitHub Archive
+│       │   ├── cache.py            # API response caching
+│       │   ├── errors.py           # Error handling classes
+│       │   └── simple_github_client.py # Simplified GitHub client
 │       │
 │       ├── database/               # Database models and management
-│       │   ├── database.py         # SQLAlchemy models (Repository, Contributor, Organization)
-│       │   └── migrations/         # Database migrations
+│       │   └── database.py         # SQLAlchemy models (Repository, Contributor, Organization)
 │       │
-│       ├── aggregation/            # Data aggregation
-│       │   └── data_aggregator.py  # Repository data aggregation
+│       ├── geocoding/              # Geographical data enrichment
+│       │   └── geocoder.py         # Location geocoding functionality
 │       │
-│       ├── config.py               # Configuration management
-│       ├── collection_strategies.py # Repository collection strategies
-│       ├── etl_orchestrator.py     # ETL process coordination
-│       ├── optimized_collector.py  # Optimized parallel data collection
+│       ├── config/                 # Configuration management
+│       │   ├── config.py           # Configuration classes
+│       │   ├── etl_config.py       # ETL configuration
+│       │   └── github_config.py    # GitHub API configuration
+│       │
+│       ├── repository_collector.py # Repository collection with time-based strategy
 │       └── main.py                 # Main application entry point
 │
-├── .env.template                  # Environment variables template
-├── requirements.txt               # Python dependencies
-└── README.md                      # Project documentation
+├── scripts/                        # Utility scripts
+│   ├── collect_repositories.py     # Standalone repository collection script
+│   ├── export_tables_to_csv.py     # Data export utilities
+│   └── update_location_geocoding.py # Location geocoding script
+│
+├── .env.template                   # Environment variables template
+├── requirements.txt                # Python dependencies
+└── README.md                       # Project documentation
 ```
 
 ## 🔑 Core Components
 
-### Collection Strategies
-- **StarRangeCollectionStrategy**: Collects repositories based on configurable star count ranges
-- **TimePeriodCollectionStrategy**: Collects repositories based on creation date ranges
+### Repository Collector
+- Implements a time-based collection strategy for GitHub repositories
+- Breaks down collection into small time periods to work around API limits
+- Tracks progress and supports resumable collection
+- Optimized to capture repositories even when results exceed API limits
 
-### ETL Orchestrator
-- Coordinates the entire data collection and processing workflow
-- Manages geocoding and geographical enrichment
-- Handles database interactions and transaction management
+### GitHub API Client
+- Manages authentication and rate limiting for GitHub API
+- Implements token rotation for improved throughput
+- Provides caching to reduce redundant API calls
+- Handles error conditions and retries
 
-### Optimized Collector
-- Implements parallel processing for efficient data collection
-- Uses thread pooling for concurrent repository processing
-- Manages token usage and rate limiting
+### Database Models
+- Implements SQLAlchemy models for Repository, Contributor, and Organization entities
+- Manages relationships between entities
+- Provides efficient query interfaces for data retrieval and analysis
 
 ### Geographical Enrichment
 - Geocodes user and organization locations to extract country and region information
@@ -404,11 +407,6 @@ GITHUB_API_TOKEN=your_github_token_here
 
 # For multiple tokens, use comma-separated values
 # GITHUB_API_TOKENS=token1,token2,token3
-
-# BigQuery (optional)
-BIGQUERY_PROJECT_ID=your_project_id
-BIGQUERY_MAX_BYTES=1000000000
-GOOGLE_APPLICATION_CREDENTIALS=path/to/credentials.json
 ```
 
 ### Command-Line Options
