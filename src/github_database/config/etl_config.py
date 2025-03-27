@@ -7,7 +7,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
 from .github_config import GitHubConfig
-from .bigquery_config import BigQueryConfig
 
 @dataclass
 class QualityConfig:
@@ -26,11 +25,6 @@ class ETLConfig:
     batch_size: int = field(default=1000)
     quality: QualityConfig = field(default_factory=QualityConfig)
     github: GitHubConfig = field(default_factory=lambda: GitHubConfig(access_token="test_token"))
-    bigquery: BigQueryConfig = field(default_factory=lambda: BigQueryConfig(
-        project_id="test-project",
-        dataset_id="github_archive",
-        credentials_path=None
-    ))
     _session: Optional[Session] = field(default=None, init=False)
     _engine: Optional[object] = field(default=None, init=False)
     _session_maker: Optional[object] = field(default=None, init=False)
