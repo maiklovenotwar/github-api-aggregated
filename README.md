@@ -57,24 +57,27 @@ cp .env.template .env
 ### Basic Usage
 
 ```bash
-# Collect repositories using time period strategy
-python -m src.github_database.main --mode collect --collection-strategy time-period --start-year 2015 --end-year 2023 --min-stars 50 --limit 1000
+# Collect repositories using time-based strategy (interactive mode)
+python scripts/collect_repositories.py --min-stars 50
 
-# Enrich collected data with geographical information
-python -m src.github_database.main --mode enrich
+# Collect repositories for a specific time range (non-interactive mode)
+python scripts/collect_repositories.py --time-range month --min-stars 50 --limit 100 --non-interactive
+
+# Show database statistics
+python scripts/collect_repositories.py --stats
 
 # Export data to CSV files
-python -m src.github_database.main --mode export --output-dir ./exports
+python scripts/export_tables_to_csv.py --output-dir ./exports
 ```
 
 ### Advanced Usage
 
 ```bash
-# Parallel collection with multiple tokens
-python -m src.github_database.main --mode collect --collection-strategy time-period --parallel --workers 10 --tokens TOKEN1 TOKEN2 TOKEN3 --start-year 2020 --end-year 2023 --min-stars 100 --limit 2000
+# Collect repositories for a custom time range
+python scripts/collect_repositories.py --time-range custom --start-date 2022-01-01 --end-date 2022-12-31 --min-stars 100 --limit 500 --non-interactive
 
-# Update existing geographical data
-python -m src.github_database.main --mode enrich --update-existing
+# Update geographical data for contributors and organizations
+python scripts/update_location_geocoding.py
 ```
 
 ## 🏗 Project Structure
