@@ -171,7 +171,7 @@ The database follows a relational model with three primary entities and two rela
 
 ```
 ┌───────────────┐       ┌─────────────────────┐       ┌────────────────┐
-│ Organization  │       │ contributor_repository │       │  Repository   │
+│ organizations │       │ contributor_repository │       │  repositories  │
 ├───────────────┤       ├─────────────────────┤       ├────────────────┤
 │ id            │       │ contributor_id      │       │ id             │
 │ login         │       │ repository_id       │       │ name           │
@@ -189,7 +189,7 @@ The database follows a relational model with three primary entities and two rela
         │               └─────────────────────┘                │
         │                                                      │
         │               ┌────────────────┐                     │
-        └───────────────┤  Contributor   ├─────────────────────┘
+        └───────────────┤  contributors  ├─────────────────────┘
                         ├────────────────┤
                         │ id             │
                         │ login          │
