@@ -1,31 +1,30 @@
 """
-GitHub API Client Implementierung.
+GitHub API Client Implementation.
 
-Dieses Modul bietet eine optimierte Schnittstelle zur GitHub API mit
-Unterstützung für:
-- Token-Pool zur Umgehung von Ratenbegrenzungen
-- Mehrstufiges Caching für effiziente Anfragen
-- Fehlerbehandlung und automatische Wiederholungsversuche
-- Standardisierte Datenformate für Repositories, Benutzer und Organisationen
+This module provides an optimized interface to the GitHub API with
+support for:
+- Token pool to bypass rate limits
+- Caching for efficient requests
+- Error handling and automatic retries
+- Standardized data formats for repositories, contributors, and organizations
 """
 
 import time
 import logging
 import requests
-import os
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Any, Optional, Tuple, Union, Set
+from datetime import datetime
+from typing import Dict, List, Any, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from ..config import GitHubConfig
 from .token_pool import TokenPool
 from .errors import GitHubAPIError, RateLimitError, AuthenticationError, NotFoundError
-from .cache import MemoryCache, DiskCache, cached
+from .cache import MemoryCache, cached
 
 logger = logging.getLogger(__name__)
 
-# Konstanten für API-Endpunkte
+# Constants for API endpoints
 GITHUB_API_BASE = "https://api.github.com"
 RATE_LIMIT_ENDPOINT = "/rate_limit"
 REPOS_ENDPOINT = "/repos"
@@ -33,26 +32,26 @@ USERS_ENDPOINT = "/users"
 ORGS_ENDPOINT = "/orgs"
 SEARCH_REPOS_ENDPOINT = "/search/repositories"
 
-# Standardwerte für Rate-Limit
+# Default values for rate limits
 DEFAULT_RATE_LIMIT = 5000
-DEFAULT_RATE_LIMIT_RESET_TIME = 3600  # 1 Stunde
+DEFAULT_RATE_LIMIT_RESET_TIME = 3600  # 1 hour
 
 
 def create_repository_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Konvertiere ein Repository-Objekt aus der GitHub API in ein standardisiertes Format.
+    Convert a repository object from the GitHub API into a standardized format.
     
     Args:
-        data: Rohdaten aus der GitHub API
+        data: Raw data from the GitHub API
         
     Returns:
-        Standardisiertes Repository-Objekt
+        Standardized repository object
     """
-    # Extrahiere Besitzerinformationen
+    # Extract owner information
     owner_data = data.get('owner', {})
     owner_type = owner_data.get('type', 'User')
     
-    # Setze Standardwerte für fehlende Felder
+    # Set default values for missing fields
     language = data.get('language', '')
     if language is None:
         language = ''
@@ -82,7 +81,7 @@ def create_repository_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
         'topics': data.get('topics', []),
         'visibility': data.get('visibility', 'public'),
         
-        # Besitzerinformationen
+        # Owner information
         'owner_id': owner_data.get('id'),
         'owner_login': owner_data.get('login', ''),
         'owner_type': owner_type,
@@ -93,13 +92,13 @@ def create_repository_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def create_user_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Konvertiere ein Benutzer-Objekt aus der GitHub API in ein standardisiertes Format.
+    Convert a user object from the GitHub API into a standardized format.
     
     Args:
-        data: Rohdaten aus der GitHub API
+        data: Raw data from the GitHub API
         
     Returns:
-        Standardisiertes Benutzer-Objekt
+        Standardized user object
     """
     return {
         'id': data.get('id'),
@@ -125,13 +124,13 @@ def create_user_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def create_organization_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Konvertiere ein Organisations-Objekt aus der GitHub API in ein standardisiertes Format.
+    Convert an organization object from the GitHub API into a standardized format.
     
     Args:
-        data: Rohdaten aus der GitHub API
+        data: Raw data from the GitHub API
         
     Returns:
-        Standardisiertes Organisations-Objekt
+        Standardized organization object
     """
     return {
         'id': data.get('id'),
@@ -155,32 +154,50 @@ def create_organization_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def create_contributor_from_api(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert a contributor object from the GitHub API into a standardized format.
+    
+    Args:
+        data: Raw data from the GitHub API
+        
+    Returns:
+        Standardized contributor object
+    """
+    return {
+        'id': data.get('id'),
+        'login': data.get('login', ''),
+        'url': data.get('html_url', ''),
+        'type': data.get('type', 'User'),
+        'site_admin': data.get('site_admin', False),
+        'contributions': data.get('contributions', 0),
+        'avatar_url': data.get('avatar_url', '')
+    }
+
+
 class GitHubAPIClient:
     """
-    Optimierter GitHub API-Client mit Token-Pool und mehrschichtigem Caching.
+    Optimized GitHub API client with token pool and caching.
     
-    Diese Klasse verwaltet Anfragen an die GitHub API mit folgenden Features:
-    - Token-Pool für effiziente Ratenbegrenzungsverwaltung
-    - In-Memory-Cache für häufig abgefragte Daten
-    - Disk-Cache für persistente Daten
-    - Automatische Wiederholungsversuche und Fehlerbehandlung
-    - Standardisierte Datenformate für Repositories, Benutzer und Organisationen
+    This class manages requests to the GitHub API with the following features:
+    - Token pool for efficient rate limit management
+    - Memory cache for frequently queried data
+    - Automatic retries and error handling
+    - Standardized data formats for repositories, users, and organizations
     """
     
-    def __init__(self, config: GitHubConfig, token_pool: Optional[TokenPool] = None, 
-                 cache_dir: Optional[str] = None):
+    def __init__(self, config: GitHubConfig, token_pool: Optional[TokenPool] = None):
         """
-        Initialisiere GitHub API-Client.
+        Initialize GitHub API client.
         
         Args:
-            config: GitHub API-Konfiguration
-            token_pool: Optional TokenPool-Instanz für multiple Tokens
-            cache_dir: Optional Verzeichnis für Disk-Cache
+            config: GitHub API configuration
+            token_pool: Optional TokenPool instance for multiple tokens
         """
         self.config = config
         self.token_pool = token_pool
         
-        # Konfiguriere Session mit Wiederholungsversuchen
+        # Configure session with retries
         self.session = requests.Session()
         retries = Retry(
             total=config.retry_count,
@@ -190,545 +207,324 @@ class GitHubAPIClient:
         )
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
         
-        # Setze Standard-Headers wenn kein Token-Pool verwendet wird
+        # Set default headers when not using a token pool
         if not token_pool:
             self.session.headers.update({
                 'Accept': 'application/vnd.github.v3+json',
                 'Authorization': f'token {config.access_token}'
             })
         else:
-            # Nur Accept-Header setzen, Token wird pro Anfrage gesetzt
+            # Only set Accept header, token is set per request
             self.session.headers.update({
                 'Accept': 'application/vnd.github.v3+json'
             })
-        
-        # Initialisiere Caches
-        cache_size = 10000  # Standard-Cachegröße
-        if cache_dir:
-            self.disk_cache = DiskCache("github_api", cache_dir)
-        else:
-            self.disk_cache = None
             
-        self.repo_cache = MemoryCache("repository", cache_size)
-        self.user_cache = MemoryCache("user", 5000)
-        self.org_cache = MemoryCache("organization", 1000)
-        self.search_cache = MemoryCache("search", 500)
+        # Initialize caches
+        self.search_cache = MemoryCache(max_size=config.cache_max_size)
         
-        logger.info(f"GitHub API-Client initialisiert mit {'Token-Pool' if token_pool else 'einzelnem Token'}")
+        # Status variables
+        self.rate_limit = DEFAULT_RATE_LIMIT
+        self.rate_limit_remaining = DEFAULT_RATE_LIMIT
+        self.rate_limit_reset = time.time() + DEFAULT_RATE_LIMIT_RESET_TIME
         
-    def _get_api_url(self, endpoint: str) -> str:
+        logger.info(f"GitHub API client initialized with {'token pool' if token_pool else 'single token'}")
+    
+    def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Erzeuge vollständige API-URL.
+        Make a request to the GitHub API with proper error handling.
         
         Args:
-            endpoint: API-Endpunkt
+            endpoint: API endpoint (relative to base URL)
+            params: Optional query parameters
             
         Returns:
-            Vollständige API-URL
-        """
-        # Entferne führenden Schrägstrich, falls vorhanden
-        if endpoint.startswith('/'):
-            endpoint = endpoint[1:]
-            
-        return f"{self.config.api_url}/{endpoint}"
-        
-    def _get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Führe GET-Anfrage an die GitHub API aus.
-        
-        Diese Methode verwaltet Token-Verwendung, Rate-Limits und Fehlerbehandlung.
-        
-        Args:
-            endpoint: API-Endpunkt
-            params: Query-Parameter
-            
-        Returns:
-            API-Antwort als Dictionary
+            Response data as dictionary
             
         Raises:
-            GitHubAPIError: Bei API-Fehlern
-            RateLimitError: Bei Überschreitung des Rate-Limits
-            AuthenticationError: Bei Authentifizierungsproblemen
+            RateLimitError: When rate limit is exceeded
+            AuthenticationError: When authentication fails
+            NotFoundError: When resource is not found
+            GitHubAPIError: For other API errors
         """
-        url = self._get_api_url(endpoint)
-        token_idx = 0
-        token = self.config.access_token
+        url = f"{GITHUB_API_BASE}{endpoint}"
         
-        # Hole Token aus Pool, falls verfügbar
+        # Use token pool if available, otherwise use the configured token
+        headers = {}
         if self.token_pool:
-            token, token_idx = self.token_pool.get_token()
-            self.session.headers.update({'Authorization': f'token {token}'})
+            token = self.token_pool.get_token()
+            headers['Authorization'] = f'token {token}'
+        
+        # Add timeout to prevent hanging connections
+        timeout = 30  # 30 seconds timeout for all requests
         
         try:
-            # Kleine Verzögerung, um API-Limits zu respektieren
-            time.sleep(self.config.rate_limit_delay)
+            logger.debug(f"Making request to {url}")
+            response = self.session.get(url, params=params, headers=headers if headers else None, timeout=timeout)
             
-            # Anfrage ausführen
-            logger.debug(f"GET {url} (Token: {token_idx if self.token_pool else 'default'})")
-            response = self.session.get(url, params=params)
+            # Update rate limit information from headers
+            if 'X-RateLimit-Limit' in response.headers:
+                self.rate_limit = int(response.headers['X-RateLimit-Limit'])
+            if 'X-RateLimit-Remaining' in response.headers:
+                self.rate_limit_remaining = int(response.headers['X-RateLimit-Remaining'])
+            if 'X-RateLimit-Reset' in response.headers:
+                self.rate_limit_reset = int(response.headers['X-RateLimit-Reset'])
             
-            # Rate-Limit-Informationen extrahieren
-            remaining = int(response.headers.get('X-RateLimit-Remaining', DEFAULT_RATE_LIMIT))
-            reset_time = float(response.headers.get('X-RateLimit-Reset', time.time() + DEFAULT_RATE_LIMIT_RESET_TIME))
+            # Handle rate limiting
+            if response.status_code == 403 and self.rate_limit_remaining == 0:
+                wait_time = self.rate_limit_reset - time.time()
+                if wait_time > 0:
+                    logger.warning(f"Rate limit exceeded. Waiting {wait_time:.1f} seconds until reset.")
+                    time.sleep(min(wait_time, 60))  # Wait at most 60 seconds, then retry
+                raise RateLimitError(f"Rate limit exceeded. Reset at {datetime.fromtimestamp(self.rate_limit_reset)}")
             
-            # Rate-Limit im Token-Pool aktualisieren
-            if self.token_pool:
-                self.token_pool.update_rate_limit(token_idx, remaining, reset_time)
-            
-            # HTTP-Fehler behandeln
+            # Handle other errors
+            if response.status_code == 401:
+                raise AuthenticationError("Authentication failed")
+            if response.status_code == 404:
+                raise NotFoundError(f"Resource not found: {url}")
             if response.status_code >= 400:
-                error_data = response.json() if response.text else {}
-                
-                # Spezifische Fehlertypen
-                if response.status_code == 403 and 'rate limit exceeded' in response.text.lower():
-                    raise RateLimitError(
-                        f"Rate-Limit überschritten: {error_data.get('message', '')}",
-                        reset_time,
-                        403,
-                        error_data
-                    )
-                elif response.status_code == 401:
-                    if self.token_pool:
-                        self.token_pool.register_error(token_idx, 'auth')
-                    raise AuthenticationError(
-                        f"Authentifizierungsfehler: {error_data.get('message', '')}",
-                        401,
-                        token_idx if self.token_pool else None,
-                        error_data
-                    )
-                elif response.status_code == 404:
-                    resource_path = endpoint.split('/')
-                    resource_type = resource_path[0] if resource_path else 'unknown'
-                    resource_id = '/'.join(resource_path[1:]) if len(resource_path) > 1 else 'unknown'
-                    raise NotFoundError(
-                        f"Ressource nicht gefunden: {endpoint}",
-                        resource_type,
-                        resource_id,
-                        404
-                    )
-                else:
-                    raise GitHubAPIError(
-                        f"GitHub API-Fehler ({response.status_code}): {error_data.get('message', '')}",
-                        response.status_code,
-                        error_data
-                    )
+                raise GitHubAPIError(f"API error: {response.status_code} - {response.text}")
             
+            # Return JSON data
             return response.json()
-            
-        except requests.exceptions.RequestException as e:
-            if self.token_pool:
-                self.token_pool.register_error(token_idx, 'network')
-            raise GitHubAPIError(f"Netzwerkfehler bei Anfrage an {url}: {str(e)}")
-            
-    def get_rate_limit(self) -> Dict[str, Any]:
+        except requests.exceptions.Timeout:
+            logger.error(f"Request to {url} timed out after {timeout} seconds")
+            raise GitHubAPIError(f"Request timed out after {timeout} seconds")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error for {url}: {e}")
+            raise GitHubAPIError(f"Connection error: {e}")
+        except (RateLimitError, AuthenticationError, NotFoundError):
+            # Re-raise specific errors
+            raise
+        except Exception as e:
+            logger.error(f"Error making request to {url}: {e}")
+            raise GitHubAPIError(f"API request error: {e}")
+    
+    def get_rate_limit_info(self) -> Dict[str, Any]:
         """
-        Hole Rate-Limit-Informationen von der GitHub API.
+        Get the current rate limit information.
         
         Returns:
-            Informationen über aktuelle Rate-Limits
+            Dictionary with rate limit information
         """
-        return self._get(RATE_LIMIT_ENDPOINT)
-        
-    def get_repository(self, owner: str, name: str) -> Dict[str, Any]:
+        try:
+            data = self._make_request(RATE_LIMIT_ENDPOINT)
+            return data.get('resources', {})
+        except Exception as e:
+            logger.error(f"Error getting rate limit info: {e}")
+            return {
+                'core': {
+                    'limit': self.rate_limit,
+                    'remaining': self.rate_limit_remaining,
+                    'reset': self.rate_limit_reset
+                }
+            }
+    
+    @cached(lambda self, owner, name: f"repo:{owner}/{name}")
+    def get_repository(self, owner: str, name: str) -> Optional[Dict[str, Any]]:
         """
-        Hole Repository-Informationen.
-        
-        Versucht zuerst, die Daten aus dem Cache zu holen, und führt dann
-        bei Bedarf eine API-Anfrage durch.
+        Get repository information.
         
         Args:
-            owner: Repository-Besitzer (Benutzer oder Organisation)
-            name: Repository-Name
+            owner: Repository owner
+            name: Repository name
             
         Returns:
-            Standardisierte Repository-Informationen
+            Standardized repository object or None if not found
         """
-        cache_key = f"{owner}/{name}"
-        cached_repo = self.repo_cache.get(cache_key)
-        
-        if cached_repo:
-            return cached_repo
-            
-        # Zusätzliche Disk-Cache-Prüfung
-        if self.disk_cache:
-            disk_cached_repo = self.disk_cache.get(f"repository:{cache_key}")
-            if disk_cached_repo:
-                self.repo_cache.set(cache_key, disk_cached_repo)
-                return disk_cached_repo
-        
-        # Anfrage an die API
         try:
-            repo_data = self._get(f"{REPOS_ENDPOINT}/{owner}/{name}")
-            repo = create_repository_from_api(repo_data)
-            
-            # In Caches speichern
-            self.repo_cache.set(cache_key, repo)
-            if self.disk_cache:
-                self.disk_cache.set(f"repository:{cache_key}", repo)
-                
-            return repo
-            
+            endpoint = f"{REPOS_ENDPOINT}/{owner}/{name}"
+            data = self._make_request(endpoint)
+            return create_repository_from_api(data)
         except NotFoundError:
-            logger.warning(f"Repository {owner}/{name} nicht gefunden")
+            logger.warning(f"Repository not found: {owner}/{name}")
             return None
-        except GitHubAPIError as e:
-            logger.error(f"Fehler beim Abrufen des Repositories {owner}/{name}: {e}")
+        except Exception as e:
+            logger.error(f"Error getting repository {owner}/{name}: {e}")
             return None
     
-    def get_user(self, login: str) -> Dict[str, Any]:
+    @cached(lambda self, owner, name: f"repo_contributors:{owner}/{name}")
+    def get_repository_contributors(self, owner: str, name: str, limit: int = 100) -> List[Dict[str, Any]]:
         """
-        Hole Benutzerinformationen.
+        Get contributors for a repository.
         
         Args:
-            login: GitHub-Benutzername
+            owner: Repository owner
+            name: Repository name
+            limit: Maximum number of contributors to return
             
         Returns:
-            Standardisierte Benutzerinformationen oder None bei Fehler
+            List of standardized contributor objects
         """
-        cached_user = self.user_cache.get(login)
-        if cached_user:
-            return cached_user
-            
         try:
-            user_data = self._get(f"{USERS_ENDPOINT}/{login}")
-            user = create_user_from_api(user_data)
-            self.user_cache.set(login, user)
-            return user
-        except (NotFoundError, GitHubAPIError) as e:
-            logger.warning(f"Fehler beim Abrufen des Benutzers {login}: {e}")
-            return None
+            endpoint = f"{REPOS_ENDPOINT}/{owner}/{name}/contributors"
+            params = {'per_page': min(100, limit), 'anon': 0}
+            data = self._make_request(endpoint, params)
+            
+            contributors = [create_contributor_from_api(contributor) for contributor in data[:limit]]
+            return contributors
+        except Exception as e:
+            logger.error(f"Error getting contributors for {owner}/{name}: {e}")
+            return []
     
-    def get_organization(self, login: str) -> Dict[str, Any]:
+    @cached(lambda self, org_name: f"org:{org_name}")
+    def get_organization(self, org_name: str) -> Optional[Dict[str, Any]]:
         """
-        Hole Organisationsinformationen.
+        Get organization information.
         
         Args:
-            login: GitHub-Organisationsname
+            org_name: Organization name
             
         Returns:
-            Standardisierte Organisationsinformationen oder None bei Fehler
+            Standardized organization object or None if not found
         """
-        cached_org = self.org_cache.get(login)
-        if cached_org:
-            return cached_org
-            
         try:
-            org_data = self._get(f"{ORGS_ENDPOINT}/{login}")
-            org = create_organization_from_api(org_data)
-            self.org_cache.set(login, org)
-            return org
-        except (NotFoundError, GitHubAPIError) as e:
-            logger.warning(f"Fehler beim Abrufen der Organisation {login}: {e}")
+            endpoint = f"{ORGS_ENDPOINT}/{org_name}"
+            data = self._make_request(endpoint)
+            return create_organization_from_api(data)
+        except NotFoundError:
+            logger.warning(f"Organization not found: {org_name}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting organization {org_name}: {e}")
             return None
     
-    def search_repositories(self, min_stars: int = 10, max_stars: Optional[int] = None, 
-                          min_forks: int = 0, limit: int = 100, language: Optional[str] = None,
-                          created_after: Optional[str] = None, created_before: Optional[str] = None,
-                          sort_by: str = "stars", sort_order: str = "desc") -> List[Dict[str, Any]]:
+    @cached(lambda self, query: f"search:{query}")
+    def search_repositories(self, query: str, sort: str = "stars", 
+                           order: str = "desc", per_page: int = 100, 
+                           page: int = 1, max_results: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Suche nach Repositories mit Qualitätsfiltern.
+        Search for repositories.
         
         Args:
-            min_stars: Mindestanzahl von Sternen
-            max_stars: Maximale Anzahl von Sternen (optional)
-            min_forks: Mindestanzahl von Forks
-            limit: Maximale Anzahl zurückzugebender Repositories
-            language: Filter für Programmiersprache
-            created_after: Filter für nach Datum erstellte Repositories (YYYY-MM-DD)
-            created_before: Filter für vor Datum erstellte Repositories (YYYY-MM-DD)
-            sort_by: Sortierfeld ("stars", "forks", "updated", "help-wanted-issues")
-            sort_order: Sortierreihenfolge ("desc" oder "asc")
+            query: Search query string
+            sort: Sort field (stars, forks, updated)
+            order: Sort order (desc, asc)
+            per_page: Results per page
+            page: Page number
+            max_results: Maximum number of results to return (paginate automatically)
             
         Returns:
-            Liste von standardisierten Repository-Objekten
+            List of standardized repository objects
         """
-        # Suchquery erstellen
-        query_parts = [f"stars:>={min_stars}"]
+        try:
+            # If max_results is specified, handle pagination automatically
+            if max_results is not None:
+                all_repos = []
+                current_page = page
+                remaining = max_results
+                
+                while remaining > 0:
+                    # Calculate how many items to fetch in this request
+                    current_per_page = min(per_page, remaining)
+                    
+                    params = {
+                        'q': query,
+                        'sort': sort,
+                        'order': order,
+                        'per_page': current_per_page,
+                        'page': current_page
+                    }
+                    
+                    logger.info(f"Fetching page {current_page} with {current_per_page} items per page")
+                    
+                    # Make the API request with timeout
+                    try:
+                        data = self._make_request(SEARCH_REPOS_ENDPOINT, params)
+                    except GitHubAPIError as e:
+                        logger.error(f"Error during repository search (page {current_page}): {e}")
+                        break
+                    
+                    items = data.get('items', [])
+                    if not items:
+                        logger.info("No more repositories found")
+                        break
+                    
+                    # Convert to standardized format
+                    repositories = [create_repository_from_api(repo) for repo in items]
+                    all_repos.extend(repositories)
+                    
+                    # Update remaining count and page
+                    remaining -= len(repositories)
+                    current_page += 1
+                    
+                    # Check if we've reached the total available results
+                    total_count = data.get('total_count', 0)
+                    if len(all_repos) >= total_count:
+                        logger.info(f"Reached all available results ({total_count})")
+                        break
+                    
+                    # Add a small delay between requests to avoid hitting rate limits
+                    time.sleep(0.5)
+                
+                logger.info(f"Collected {len(all_repos)} repositories in total")
+                return all_repos[:max_results]  # Ensure we don't return more than requested
+            
+            # Single page request
+            params = {
+                'q': query,
+                'sort': sort,
+                'order': order,
+                'per_page': per_page,
+                'page': page
+            }
+            
+            data = self._make_request(SEARCH_REPOS_ENDPOINT, params)
+            
+            items = data.get('items', [])
+            total_count = data.get('total_count', 0)
+            
+            logger.info(f"Found {total_count} repositories matching query: {query}")
+            
+            repositories = [create_repository_from_api(repo) for repo in items]
+            return repositories
+        except Exception as e:
+            logger.error(f"Error searching repositories with query '{query}': {e}")
+            return []
+    
+    def search_repositories_by_time(self, min_stars: int = 10, 
+                                  created_after: str = "2014-01-01",
+                                  language: Optional[str] = None,
+                                  limit: int = 1000) -> List[Dict[str, Any]]:
+        """
+        Search for repositories created after a specific date with minimum stars.
         
-        if max_stars:
-            query_parts.append(f"stars:<={max_stars}")
+        Args:
+            min_stars: Minimum number of stars
+            created_after: Creation date in YYYY-MM-DD format
+            language: Optional language filter
+            limit: Maximum number of repositories to return
             
-        if min_forks > 0:
-            query_parts.append(f"forks:>={min_forks}")
-            
+        Returns:
+            List of standardized repository objects
+        """
+        # Build query
+        query_parts = [f"stars:>={min_stars}", f"created:>={created_after}"]
+        
         if language:
             query_parts.append(f"language:{language}")
             
-        if created_after:
-            query_parts.append(f"created:>={created_after}")
-            
-        if created_before:
-            query_parts.append(f"created:<={created_before}")
-            
         query = " ".join(query_parts)
         
-        # Cacheabfrage
-        cache_key = f"search:{query}:{sort_by}:{sort_order}:{limit}"
-        cached_results = self.search_cache.get(cache_key)
-        if cached_results:
-            return cached_results
+        # Determine how many pages to fetch
+        pages_needed = (limit + 99) // 100  # Ceiling division by 100
         
-        # Parameter für die API-Anfrage
-        params = {
-            "q": query,
-            "sort": sort_by,
-            "order": sort_order,
-            "per_page": min(100, limit)  # GitHub API erlaubt max. 100 pro Seite
-        }
-        
-        try:
-            collected_repos = []
-            page = 1
+        all_repos = []
+        for page in range(1, pages_needed + 1):
+            repos = self.search_repositories(query, page=page)
+            all_repos.extend(repos)
             
-            # Paginierung implementieren
-            while len(collected_repos) < limit:
-                params["page"] = page
-                search_data = self._get(SEARCH_REPOS_ENDPOINT, params)
+            # Check if we got less than a full page
+            if len(repos) < 100:
+                break
                 
-                items = search_data.get("items", [])
-                if not items:
-                    break
-                    
-                # Repositories konvertieren und zum Ergebnis hinzufügen
-                for item in items:
-                    repo = create_repository_from_api(item)
-                    
-                    # Füge das Repository auch zum Repository-Cache hinzu
-                    self.repo_cache.set(repo["full_name"], repo)
-                    
-                    collected_repos.append(repo)
-                    if len(collected_repos) >= limit:
-                        break
+            # Check if we have enough repositories
+            if len(all_repos) >= limit:
+                break
                 
-                # Prüfen, ob es weitere Seiten gibt
-                if len(items) < params["per_page"]:
-                    break
-                    
-                page += 1
-            
-            # Ergebnisse cachen
-            self.search_cache.set(cache_key, collected_repos)
-            
-            return collected_repos
-            
-        except GitHubAPIError as e:
-            logger.error(f"Fehler bei der Repository-Suche: {e}")
-            return []
+        return all_repos[:limit]
     
-    def get_repository_contributors(self, repo_full_name: str, max_contributors: int = 100) -> List[Dict[str, Any]]:
-        """
-        Hole Mitwirkende eines Repositories.
-        
-        Args:
-            repo_full_name: Vollständiger Repository-Name (owner/repo)
-            max_contributors: Maximale Anzahl zurückzugebender Mitwirkender
-            
-        Returns:
-            Liste von Mitwirkenden mit Beitragsinformationen
-        """
-        try:
-            # API-Anfrage für Mitwirkende
-            endpoint = f"{REPOS_ENDPOINT}/{repo_full_name}/contributors"
-            params = {"per_page": min(100, max_contributors), "anon": "false"}
-            
-            contributors_data = self._get(endpoint, params)
-            
-            # Daten formatieren
-            contributors = []
-            for contributor in contributors_data:
-                contributor_info = {
-                    'id': contributor.get('id'),
-                    'login': contributor.get('login'),
-                    'type': contributor.get('type'),
-                    'contributions': contributor.get('contributions', 0),
-                    'url': contributor.get('html_url')
-                }
-                contributors.append(contributor_info)
-                
-                # Auch gleich Benutzerdetails cachen, wenn verfügbar
-                if contributor.get('login'):
-                    user_data = {
-                        'id': contributor.get('id'),
-                        'login': contributor.get('login'),
-                        'type': contributor.get('type'),
-                        'url': contributor.get('html_url'),
-                        'avatar_url': contributor.get('avatar_url')
-                    }
-                    self.user_cache.set(contributor['login'], user_data)
-            
-            return contributors
-            
-        except GitHubAPIError as e:
-            logger.warning(f"Fehler beim Abrufen der Mitwirkenden für {repo_full_name}: {e}")
-            return []
-    
-    def get_repository_languages(self, repo_full_name: str) -> Dict[str, int]:
-        """
-        Hole Sprachstatistiken eines Repositories.
-        
-        Args:
-            repo_full_name: Vollständiger Repository-Name (owner/repo)
-            
-        Returns:
-            Dictionary mit Sprachen als Schlüssel und Bytes als Werte
-        """
-        try:
-            endpoint = f"{REPOS_ENDPOINT}/{repo_full_name}/languages"
-            return self._get(endpoint)
-        except GitHubAPIError as e:
-            logger.warning(f"Fehler beim Abrufen der Sprachen für {repo_full_name}: {e}")
-            return {}
-    
-    def get_repository_topics(self, repo_full_name: str) -> List[str]:
-        """
-        Hole Themen eines Repositories.
-        
-        Args:
-            repo_full_name: Vollständiger Repository-Name (owner/repo)
-            
-        Returns:
-            Liste von Themen-Tags
-        """
-        try:
-            # Die GitHub API benötigt einen speziellen Accept-Header für Themen
-            old_accept = self.session.headers.get('Accept')
-            self.session.headers.update({'Accept': 'application/vnd.github.mercy-preview+json'})
-            
-            endpoint = f"{REPOS_ENDPOINT}/{repo_full_name}/topics"
-            data = self._get(endpoint)
-            
-            # Header wiederherstellen
-            self.session.headers.update({'Accept': old_accept})
-            
-            return data.get('names', [])
-        except GitHubAPIError as e:
-            logger.warning(f"Fehler beim Abrufen der Themen für {repo_full_name}: {e}")
-            return []
-    
-    def get_repository_with_details(self, owner: str, name: str) -> Dict[str, Any]:
-        """
-        Hole umfassende Repository-Informationen mit zusätzlichen Details.
-        
-        Diese Methode kombiniert mehrere API-Anfragen, um ein vollständiges
-        Bild eines Repositories zu erhalten.
-        
-        Args:
-            owner: Repository-Besitzer
-            name: Repository-Name
-            
-        Returns:
-            Erweitertes Repository-Objekt mit zusätzlichen Details
-        """
-        repo_full_name = f"{owner}/{name}"
-        
-        # Basis-Repository-Informationen abrufen
-        repo = self.get_repository(owner, name)
-        if not repo:
-            return None
-            
-        # Zusätzliche Informationen hinzufügen
-        try:
-            # Sprachen
-            repo['languages'] = self.get_repository_languages(repo_full_name)
-            
-            # Themen (falls nicht bereits in der Basis-Anfrage enthalten)
-            if not repo.get('topics'):
-                repo['topics'] = self.get_repository_topics(repo_full_name)
-                
-            # Top-Mitwirkende (begrenzt auf 5 für Effizienz)
-            top_contributors = self.get_repository_contributors(repo_full_name, 5)
-            repo['top_contributors'] = top_contributors
-            
-            # Besitzerdetails basierend auf Typ abrufen
-            if repo['owner_type'] == 'Organization':
-                owner_details = self.get_organization(repo['owner_login'])
-            else:
-                owner_details = self.get_user(repo['owner_login'])
-                
-            if owner_details:
-                repo['owner_details'] = owner_details
-            
-            return repo
-            
-        except GitHubAPIError as e:
-            logger.warning(f"Fehler beim Abrufen erweiterter Details für {repo_full_name}: {e}")
-            return repo  # Rückgabe der Basis-Informationen
-    
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """
-        Hole Cache-Statistiken.
-        
-        Returns:
-            Dictionary mit Cache-Statistiken
-        """
-        stats = {
-            'repository_cache': self.repo_cache.stats(),
-            'user_cache': self.user_cache.stats(),
-            'organization_cache': self.org_cache.stats(),
-            'search_cache': self.search_cache.stats()
-        }
-        
-        if self.disk_cache:
-            stats['disk_cache'] = self.disk_cache.stats()
-            
-        return stats
-    
-    def clear_caches(self) -> None:
-        """Leere alle Caches."""
-        self.repo_cache.clear()
-        self.user_cache.clear()
-        self.org_cache.clear()
+    def clear_search_cache(self):
+        """Clear the search cache."""
         self.search_cache.clear()
-        
-        if self.disk_cache:
-            self.disk_cache.clear()
-            
-        logger.info("Alle API-Caches wurden geleert")
-    
-    def clear_search_cache(self) -> None:
-        """Leere nur den Such-Cache für frische Suchergebnisse."""
-        self.search_cache.clear()
-        logger.info("Such-Cache wurde geleert")
-    
-    def get_api_statistics(self) -> Dict[str, Any]:
-        """
-        Gibt Statistiken zur API-Nutzung zurück.
-        
-        Returns:
-            Dictionary mit API-Nutzungsstatistiken
-        """
-        stats = {
-            'requests': getattr(self, '_request_count', 0),
-            'cache_hits': sum([
-                self.repo_cache.stats().get('hits', 0),
-                self.user_cache.stats().get('hits', 0),
-                self.org_cache.stats().get('hits', 0),
-                self.search_cache.stats().get('hits', 0)
-            ])
-        }
-        
-        if hasattr(self, '_rate_limit_remaining'):
-            stats['rate_limit_remaining'] = self._rate_limit_remaining
-            
-        return stats
-    
-    @classmethod
-    def from_config(cls, config, cache_dir: Optional[str] = None):
-        """
-        Erstelle GitHubAPIClient aus Konfiguration.
-        
-        Diese Factory-Methode erstellt einen Client mit optionalem Token-Pool
-        basierend auf der Konfiguration.
-        
-        Args:
-            config: Konfigurationsobjekt mit GitHub-Einstellungen
-            cache_dir: Optionales Cache-Verzeichnis
-            
-        Returns:
-            Konfigurierter GitHubAPIClient
-        """
-        token_pool = None
-        if config.github.use_token_pool and config.github.additional_tokens:
-            token_pool = TokenPool.from_config(config.github)
-            
-        return cls(config.github, token_pool, cache_dir=cache_dir if cache_dir else config.cache_dir)
+        logger.info("Search cache cleared")

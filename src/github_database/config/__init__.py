@@ -1,7 +1,22 @@
-"""Configuration package."""
+"""
+Configuration package for GitHub data ETL.
 
-from .github_config import GitHubConfig
-from .bigquery_config import BigQueryConfig
-from .etl_config import ETLConfig, QualityConfig
+This package provides a unified configuration interface for all components of the
+GitHub data ETL system.
+"""
 
-__all__ = ['GitHubConfig', 'BigQueryConfig', 'ETLConfig', 'QualityConfig']
+from .config import (
+    GitHubConfig, 
+    QualityConfig, 
+    CacheConfig, 
+    ETLConfig, 
+    load_config
+)
+
+__all__ = [
+    'GitHubConfig', 
+    'QualityConfig', 
+    'CacheConfig', 
+    'ETLConfig', 
+    'load_config'
+]
