@@ -5,6 +5,7 @@ from typing import Optional, List
 import os
 import logging
 
+
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime,
     ForeignKey, Text, create_engine, Table, func, desc
@@ -101,7 +102,7 @@ class Repository(Base):
     organization_id = Column(Integer, ForeignKey('organizations.id'))
     
     # Metadata
-    description = Column(Text)
+    description = Column(Text(length=16_777_215))
     homepage = Column(String)
     language = Column(String)
     private = Column(Boolean, default=False)
@@ -166,14 +167,16 @@ class GitHubDatabase:
         Args:
             db_path: Path to SQLite database or None for in-memory DB
         """
-        if db_path:
-            # SQLite database path
-            if not db_path.startswith('sqlite:///'):
-                db_path = f'sqlite:///{db_path}'
-        else:
-            # In-memory database for tests
+        db_path = db_path or os.getenv('DATABASE_URL')
+        
+        if not db_path:
+            # Use in-memory SQLite as last fallback
             db_path = 'sqlite:///:memory:'
-            
+
+        # Log clearly what's being used
+        logger.info(f"Connecting using DB path: {db_path}")
+        
+        # Initialize session and engine
         self.db_url = db_path
         self.Session = init_db(db_path)
         self.session = self.Session()

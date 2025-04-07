@@ -8,6 +8,8 @@ import logging
 import argparse
 from datetime import datetime, timedelta
 from dateutil import tz
+from dotenv import load_dotenv
+
 
 # Add the src directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
@@ -18,7 +20,7 @@ from github_database.repository_collector import RepositoryCollector
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
@@ -411,9 +413,13 @@ def main():
         api_client = setup_api_client()
         
         # Connect to the database
-        db_path = args.db_path if args.db_path else os.path.join(os.path.dirname(os.path.dirname(__file__)), "github_data.db")
+        #db_path = args.db_path if args.db_path else os.path.join(os.path.dirname(os.path.dirname(__file__)), "github_data.db")
+        db_path = args.db_path or os.getenv("DATABASE_URL")
+#        db_path = os.getenv('DATABASE_URL')
+        logger.info(f"Connecting to database: {db_path}")
         db = GitHubDatabase(db_path=db_path)
         logger.info(f"Connected to database: {db_path}")
+
         
         # Show stats and exit if requested
         if args.stats:

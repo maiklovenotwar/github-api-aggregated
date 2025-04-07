@@ -419,6 +419,9 @@ class RepositoryCollector:
             per_page=100,  # Maximum per page
             max_results=limit  # Total limit (None for all available)
         )
+
+        MAX_DESCRIPTION_LENGTH = 16 * 1024 * 1024  # 16 MB for MEDIUMTEXT
+
         
         # Process and insert repositories into the database
         collected_repos = []
@@ -470,12 +473,25 @@ class RepositoryCollector:
                         org = self.db.get_or_create_organization(org_data)
                     org_id = org.id
                 
+#                # Check if the repository description is too long 
+                description = repo_data.get('description')
+                if description:
+                    encoded = description.encode('utf-8')
+                    if len(encoded) > MAX_DESCRIPTION_LENGTH:
+                        logger.warning(
+                            f"Truncating description for repo {repo_data.get('full_name')} "
+                            f"from {len(encoded)} bytes to {MAX_DESCRIPTION_LENGTH} bytes"
+                        )
+                        truncated = encoded[:MAX_DESCRIPTION_LENGTH]
+                        description = truncated.decode('utf-8', errors='ignore')
+                    #repo.description = description
+
                 # Insert the repository
                 repo_data_to_insert = {
                     'id': repo_data.get('id'),
                     'name': repo_data.get('name'),
                     'full_name': full_name,
-                    'description': repo_data.get('description'),
+                    'description': description, #repo_data.get('description'),
                     'language': repo_data.get('language'),
                     'stargazers_count': repo_data.get('stargazers_count'),
                     'watchers_count': repo_data.get('watchers_count'),
